@@ -184,6 +184,53 @@ int generate_coinbase_input(int height, char *cb, int *target_pot_index) {
 	return cb_input_sz;
 }
 
+/* Bitcoin GetLegacySigOpCount on one scriptPubKey, times WITNESS_SCALE_FACTOR.
+ * CHECKSIG / CHECKSIGVERIFY cost 4. CHECKMULTISIG / CHECKMULTISIGVERIFY cost 80
+ * (20 keys, not the accurate BIP16 count). Pushes are skipped so a CHECKSIG
+ * byte inside data is not counted. A truncated push stops the walk. */
+int datum_script_legacy_sigop_cost(const unsigned char *script, int len) {
+	size_t i = 0;
+	int n = 0;
+	const size_t nlen = (len > 0) ? (size_t)len : 0;
+	
+	if (!script || !nlen) return 0;
+	
+	while (i < nlen) {
+		const unsigned char opcode = script[i++];
+		size_t push = 0;
+		
+		if (opcode <= 0x4b) {
+			push = opcode;
+		} else if (opcode == 0x4c) { // OP_PUSHDATA1
+			if (i >= nlen) break;
+			push = script[i++];
+		} else if (opcode == 0x4d) { // OP_PUSHDATA2
+			if (i + 1 >= nlen) break;
+			push = (size_t)script[i] | ((size_t)script[i + 1] << 8);
+			i += 2;
+		} else if (opcode == 0x4e) { // OP_PUSHDATA4
+			uint32_t npush;
+			if (i + 3 >= nlen) break;
+			npush = (uint32_t)script[i] | ((uint32_t)script[i + 1] << 8) | ((uint32_t)script[i + 2] << 16) | ((uint32_t)script[i + 3] << 24);
+			i += 4;
+			if (npush > nlen - i) break;
+			i += npush;
+			continue;
+		} else if ((opcode == 0xac) || (opcode == 0xad)) { // CHECKSIG / VERIFY
+			n++;
+		} else if ((opcode == 0xae) || (opcode == 0xaf)) { // CHECKMULTISIG / VERIFY
+			n += 20;
+		}
+		
+		if (push) {
+			if (push > nlen - i) break;
+			i += push;
+		}
+	}
+	
+	return n * 4;
+}
+
 void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s, int coinbase_index, int remaining_size, bool space_for_en_in_coinbase, int *cb1idx, int *cb2idx, bool special_coinb1) {
 	// This function finishes off the stratum coinb1+coinb2 using the available outputs in the job and other flags specified.
 	// it does not attempt to maximize coinb1's size to any specific size
@@ -210,13 +257,15 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
 	// (from GBT, in sigop cost units, where one legacy CHECKSIG counts 4) minus
 	// the cost of the template's transactions and minus the cost of the pool's
 	// own output. available_coinbase_outputs[].sigops is set by the coinbaser
-	// parser: 4 for a script whose first byte is OP_DUP (0x76, P2PKH) and 0
-	// for every other script. The pool output is charged the same way. An
-	// output whose cost exceeds the remaining budget is skipped, the same as an
-	// output that exceeds the remaining size, in both this counting pass and
-	// the writing pass below.
+	// parser from GetLegacySigOpCount * WITNESS_SCALE_FACTOR, not a first-byte
+	// P2PKH guess. The pool output is charged the same way. An output whose
+	// cost exceeds the remaining budget is skipped, the same as an output that
+	// exceeds the remaining size, in both this counting pass and the writing
+	// pass below.
 	int64_t sigops_budget = (int64_t)s->block_template->sigoplimit - (int64_t)s->block_template->txn_total_sigops;
-	if ((s->pool_addr_script_len > 0) && (s->pool_addr_script[0] == 0x76)) sigops_budget -= 4;
+	if (s->pool_addr_script_len > 0) {
+		sigops_budget -= datum_script_legacy_sigop_cost(s->pool_addr_script, s->pool_addr_script_len);
+	}
 	if (sigops_budget < 0) sigops_budget = 0;
 	int64_t sigops_left = sigops_budget;
 	for(k=0;k<s->available_coinbase_outputs_count;k++) {
@@ -842,11 +891,8 @@ int datum_coinbaser_v2_parse(T_DATUM_STRATUM_JOB *s, unsigned char *coinbaser, i
 		memcpy(s->available_coinbase_outputs[cbvalid].output_script, &coinbaser[cidx], slen); cidx+=slen;
 		// 64-bit value in sats is part of the output
 		s->available_coinbase_outputs[cbvalid].value_sats = outval;
-		if (s->available_coinbase_outputs[cbvalid].output_script[0] == 0x76) { // kludge for checking for P2PKH output
-			s->available_coinbase_outputs[cbvalid].sigops = 4;
-		} else {
-			s->available_coinbase_outputs[cbvalid].sigops = 0;
-		}
+		s->available_coinbase_outputs[cbvalid].sigops = datum_script_legacy_sigop_cost(
+			s->available_coinbase_outputs[cbvalid].output_script, slen);
 		
 		s->available_coinbase_outputs[cbvalid].output_script_len = slen;
 		

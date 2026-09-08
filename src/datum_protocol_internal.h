@@ -98,6 +98,8 @@ int datum_protocol_abw_assignment_notice(int len, unsigned char *data);
 int datum_protocol_abw_reveal(int len, unsigned char *data);
 
 int datum_protocol_mining_cmd(void *data, int len);
+int datum_protocol_coinbaser_fetch_response(int len, unsigned char *data);
+bool datum_protocol_coinbaser_reply_is_for_job(uint64_t value, const unsigned char prevhash[32]);
 int datum_protocol_client_configure(int len, unsigned char *data);
 int datum_protocol_mining_cmd5(
 	T_DATUM_PROTOCOL_HEADER *header, unsigned char *data);

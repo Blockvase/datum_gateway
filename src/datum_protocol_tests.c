@@ -916,6 +916,34 @@ cleanup:
 	free(job);
 }
 
+static void datum_protocol_coinbaser_prevhash_tests(void) {
+	unsigned char stock[12 + 1];
+	unsigned char ext[12 + 1 + 32];
+	unsigned char parent_a[32];
+	unsigned char parent_b[32];
+	const uint64_t value = UINT64_C(3125000000);
+	
+	memset(parent_a, 0xa1, sizeof(parent_a));
+	memset(parent_b, 0xb2, sizeof(parent_b));
+	memset(stock, 0, sizeof(stock));
+	pk_u64le(stock, 0, value);
+	pk_u32le(stock, 8, 1);
+	stock[12] = 1;
+	
+	/* Stock value + blob: any parent matches (OCEAN/CONVOY servers). */
+	datum_test(datum_protocol_coinbaser_fetch_response((int)sizeof(stock), stock) == 1);
+	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_a));
+	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_b));
+	datum_test(!datum_protocol_coinbaser_reply_is_for_job(value + 1, parent_a));
+	
+	/* Trailer binds the reply to one prevhash. */
+	memcpy(ext, stock, 13);
+	memcpy(ext + 13, parent_a, 32);
+	datum_test(datum_protocol_coinbaser_fetch_response((int)sizeof(ext), ext) == 1);
+	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_a));
+	datum_test(!datum_protocol_coinbaser_reply_is_for_job(value, parent_b));
+}
+
 void datum_protocol_tests(void) {
 	datum_protocol_config_v3_tests();
 	datum_protocol_migration_tests();
@@ -925,4 +953,5 @@ void datum_protocol_tests(void) {
 	datum_pow_response_large_difficulty_test();
 	datum_pow_recycled_protocol_job_test();
 	datum_protocol_stxlist_byid_tests();
+	datum_protocol_coinbaser_prevhash_tests();
 }

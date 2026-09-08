@@ -1257,6 +1257,18 @@ unsigned char *datum_coinbaser_v2_response = NULL;
 unsigned char datum_coinbaser_v2_response_buf_idx = 0;
 uint64_t datum_coinbaser_v2_response_value[2] = { 0, 0 };
 int datum_coinbaser_v2_response_len[2] = { 0, 0 };
+unsigned char datum_coinbaser_v2_response_prevhash[2][32];
+bool datum_coinbaser_v2_response_has_prevhash[2] = { false, false };
+
+bool datum_protocol_coinbaser_reply_is_for_job(uint64_t value, const unsigned char prevhash[32]) {
+	const unsigned char idx = datum_coinbaser_v2_response_buf_idx;
+	
+	if (!datum_coinbaser_v2_response) return false;
+	if (datum_coinbaser_v2_response_value[idx] != value) return false;
+	if (!datum_coinbaser_v2_response_has_prevhash[idx]) return true;
+	if (!prevhash) return false;
+	return memcmp(datum_coinbaser_v2_response_prevhash[idx], prevhash, 32) == 0;
+}
 
 static int datum_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *timeout) {
 #ifndef HAVE_PTHREAD_MUTEX_TIMEDLOCK
@@ -1318,6 +1330,15 @@ int datum_protocol_coinbaser_fetch_response(int len, unsigned char *data) {
 	memcpy(datum_coinbaser_v2_response, &data[12], x);
 	datum_coinbaser_v2_response_value[datum_coinbaser_v2_response_buf_idx] = v;
 	datum_coinbaser_v2_response_len[datum_coinbaser_v2_response_buf_idx] = x;
+	// Optional trailer after the blob: the request prevhash. Stock OCEAN/CONVOY
+	// replies are value + blob only. Prime appends 32 bytes so a late reply
+	// for the same sat value cannot bind to a different tip.
+	if ((unsigned int)len >= 12u + x + 32u) {
+		memcpy(datum_coinbaser_v2_response_prevhash[datum_coinbaser_v2_response_buf_idx], &data[12 + x], 32);
+		datum_coinbaser_v2_response_has_prevhash[datum_coinbaser_v2_response_buf_idx] = true;
+	} else {
+		datum_coinbaser_v2_response_has_prevhash[datum_coinbaser_v2_response_buf_idx] = false;
+	}
 	
 	pthread_cond_signal(&datum_protocol_coinbaser_fetch_cond); // Signal the condition variable
 	pthread_mutex_unlock(&datum_protocol_coinbaser_fetch_mutex);
@@ -1365,6 +1386,7 @@ int datum_protocol_coinbaser_fetch(void *sptr) {
 	// receive thread cannot store and signal a reply before this thread is waiting for it.
 	// The send only appends to the outgoing buffer; it never blocks on the socket.
 	// CONVOY #9: take the lock before send; wait for this job's value, not any wakeup.
+	// If the reply carries a prevhash trailer, require that too.
 	pthread_mutex_lock(&datum_protocol_coinbaser_fetch_mutex);
 	datum_coinbaser_v2_response = NULL;
 
@@ -1378,9 +1400,8 @@ int datum_protocol_coinbaser_fetch(void *sptr) {
 	clock_gettime(CLOCK_REALTIME, &ts);
 	ts.tv_sec += 5; // Set timeout to 5 seconds
 
-	// Loop on the reply for this job's value: a stale reply or a spurious wakeup is not the answer.
-	while ((!datum_coinbaser_v2_response) ||
-	       (datum_coinbaser_v2_response_value[datum_coinbaser_v2_response_buf_idx] != value)) {
+	// Loop on the reply for this job: value, and prevhash when the server sent one.
+	while (!datum_protocol_coinbaser_reply_is_for_job(value, s->prevhash_bin)) {
 		rc = pthread_cond_timedwait(&datum_protocol_coinbaser_fetch_cond, &datum_protocol_coinbaser_fetch_mutex, &ts);
 		if (rc == ETIMEDOUT) {
 			pthread_mutex_unlock(&datum_protocol_coinbaser_fetch_mutex);
@@ -1397,7 +1418,7 @@ int datum_protocol_coinbaser_fetch(void *sptr) {
 	i = 0;
 	
 	// process received coinbase
-	if ((datum_coinbaser_v2_response) && (datum_coinbaser_v2_response_value[datum_coinbaser_v2_response_buf_idx] == value)) {
+	if (datum_protocol_coinbaser_reply_is_for_job(value, s->prevhash_bin)) {
 		i = datum_coinbaser_v2_parse(s, datum_coinbaser_v2_response, datum_coinbaser_v2_response_len[datum_coinbaser_v2_response_buf_idx], false);
 	}
 	

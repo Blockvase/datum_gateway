@@ -169,9 +169,69 @@ static void datum_blake2b_coinbase_sigops_tests(void) {
 	free(job);
 }
 
+/* Compressed P2PK: OP_DATA_33 <33 bytes> OP_CHECKSIG. First byte is 0x21, not
+ * OP_DUP, so the old first-byte guess charged 0. */
+static const unsigned char datum_test_p2pk_script[35] = {0x21, [34] = 0xac};
+
+static void datum_script_legacy_sigop_cost_tests(void) {
+	const unsigned char p2sh[23] = {0xa9, 0x14, [22] = 0x87};
+	const unsigned char p2tr[34] = {0x51, 0x20};
+	const unsigned char checksig_in_push[2] = {0x01, 0xac};
+	const unsigned char bare_multisig[3] = {0x51, 0x51, 0xae};
+	const unsigned char two_checksig[2] = {0xac, 0xad};
+	const unsigned char starts_dup_two_checksig[3] = {0x76, 0xac, 0xac};
+	const unsigned char truncated_push[2] = {0x4c, 0x10};
+
+	datum_test(datum_script_legacy_sigop_cost(NULL, 25) == 0);
+	datum_test(datum_script_legacy_sigop_cost(datum_test_p2pkh_script, 0) == 0);
+	datum_test(datum_script_legacy_sigop_cost(datum_test_p2pkh_script, sizeof(datum_test_p2pkh_script)) == 4);
+	datum_test(datum_script_legacy_sigop_cost(datum_test_p2wpkh_script, sizeof(datum_test_p2wpkh_script)) == 0);
+	datum_test(datum_script_legacy_sigop_cost(p2sh, sizeof(p2sh)) == 0);
+	datum_test(datum_script_legacy_sigop_cost(p2tr, sizeof(p2tr)) == 0);
+	datum_test(datum_script_legacy_sigop_cost(datum_test_p2pk_script, sizeof(datum_test_p2pk_script)) == 4);
+	datum_test(datum_script_legacy_sigop_cost(checksig_in_push, sizeof(checksig_in_push)) == 0);
+	datum_test(datum_script_legacy_sigop_cost(bare_multisig, sizeof(bare_multisig)) == 80);
+	datum_test(datum_script_legacy_sigop_cost(two_checksig, sizeof(two_checksig)) == 8);
+	datum_test(datum_script_legacy_sigop_cost(starts_dup_two_checksig, sizeof(starts_dup_two_checksig)) == 8);
+	datum_test(datum_script_legacy_sigop_cost(truncated_push, sizeof(truncated_push)) == 0);
+}
+
+static void datum_coinbaser_bare_p2pk_sigops_tests(void) {
+	T_DATUM_TEMPLATE_DATA tdata;
+	T_DATUM_STRATUM_JOB *job = calloc(1, sizeof(*job));
+	unsigned char response[1 + 8 + 1 + sizeof(datum_test_p2pk_script)];
+
+	datum_test(job != NULL);
+	if (!job) return;
+
+	job->coinbase_value = 5000000000ULL;
+	response[0] = 1;
+	response[1] = 1;
+	memset(response + 2, 0, 7);
+	response[9] = (unsigned char)sizeof(datum_test_p2pk_script);
+	memcpy(response + 10, datum_test_p2pk_script, sizeof(datum_test_p2pk_script));
+	datum_test(datum_coinbaser_v2_parse(job, response, sizeof(response), false) == 1);
+	datum_test(job->available_coinbase_outputs[0].sigops == 4);
+
+	memset(&tdata, 0, sizeof(tdata));
+	tdata.sigoplimit = 80000;
+	job->block_template = &tdata;
+	job->available_coinbase_outputs_count = 1;
+	memcpy(job->available_coinbase_outputs[0].output_script, datum_test_p2pk_script, sizeof(datum_test_p2pk_script));
+	job->available_coinbase_outputs[0].output_script_len = sizeof(datum_test_p2pk_script);
+	job->available_coinbase_outputs[0].value_sats = 100000000;
+	/* Budget of 0: the bare P2PK must be skipped (old first-byte guess packed it). */
+	datum_test(!strncmp(datum_coinbase_output_count_hex(job, 80000, false), "02", 2));
+	/* Budget of 4: the bare P2PK fits. */
+	datum_test(!strncmp(datum_coinbase_output_count_hex(job, 80000 - 4, false), "03", 2));
+	free(job);
+}
+
 void datum_coinbaser_tests(void) {
 	datum_prime_id_64bit_tests();
 	datum_blake2b_coinbase_limit_tests();
 	datum_blake2b_coinbase_sigops_tests();
+	datum_script_legacy_sigop_cost_tests();
+	datum_coinbaser_bare_p2pk_sigops_tests();
 	datum_coinbaser_value_overflow_tests();
 }
