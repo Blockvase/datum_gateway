@@ -90,6 +90,7 @@ void datum_pow_tests(void);
 void datum_protocol_tests(void);
 void datum_stratum_dupes_tests(void);
 void datum_utils_tests(void);
+void datum_logger_tests(void);
 void datum_submitblock_tests(void);
 
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
@@ -111,6 +112,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 			break;
 		case 0x101:  // test
 			datum_utils_tests();
+			datum_logger_tests();
 			datum_conf_tests();
 			datum_blocktemplates_tests();
 			datum_coinbaser_tests();
