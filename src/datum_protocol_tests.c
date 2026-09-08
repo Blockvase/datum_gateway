@@ -916,19 +916,31 @@ cleanup:
 	free(job);
 }
 
+static void fill_stock_coinbaser(unsigned char *out, size_t out_len, uint64_t value)
+{
+	memset(out, 0, out_len);
+	pk_u64le(out, 0, value);
+	pk_u32le(out, 8, 1);
+	out[12] = 1;
+}
+
 static void datum_protocol_coinbaser_prevhash_tests(void) {
 	unsigned char stock[12 + 1];
-	unsigned char ext[12 + 1 + 32];
+	unsigned char pad31[12 + 1 + 31];
+	unsigned char pad32[12 + 1 + 32];
+	unsigned char pad100[12 + 1 + 100];
+	unsigned char magicked[12 + 1 + DATUM_COINBASER_PREVHASH_TRAILER_LEN];
+	unsigned char wrong[12 + 1 + DATUM_COINBASER_PREVHASH_TRAILER_LEN];
 	unsigned char parent_a[32];
 	unsigned char parent_b[32];
 	const uint64_t value = UINT64_C(3125000000);
 	
 	memset(parent_a, 0xa1, sizeof(parent_a));
 	memset(parent_b, 0xb2, sizeof(parent_b));
-	memset(stock, 0, sizeof(stock));
-	pk_u64le(stock, 0, value);
-	pk_u32le(stock, 8, 1);
-	stock[12] = 1;
+	datum_test(!(DATUM_COINBASER_PREVHASH_MAGIC[0] == DATUM_COINBASER_PREVHASH_MAGIC[1]
+		     && DATUM_COINBASER_PREVHASH_MAGIC[1] == DATUM_COINBASER_PREVHASH_MAGIC[2]
+		     && DATUM_COINBASER_PREVHASH_MAGIC[2] == DATUM_COINBASER_PREVHASH_MAGIC[3]));
+	fill_stock_coinbaser(stock, sizeof(stock), value);
 	
 	/* Stock value + blob: any parent matches (OCEAN/CONVOY servers). */
 	datum_test(datum_protocol_coinbaser_fetch_response((int)sizeof(stock), stock) == 1);
@@ -936,12 +948,45 @@ static void datum_protocol_coinbaser_prevhash_tests(void) {
 	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_b));
 	datum_test(!datum_protocol_coinbaser_reply_is_for_job(value + 1, parent_a));
 	
-	/* Trailer binds the reply to one prevhash. */
-	memcpy(ext, stock, 13);
-	memcpy(ext + 13, parent_a, 32);
-	datum_test(datum_protocol_coinbaser_fetch_response((int)sizeof(ext), ext) == 1);
+	/* Repeated-byte pads of 31, 32, and 100: no magic, so no prevhash. */
+	fill_stock_coinbaser(pad31, sizeof(pad31), value);
+	memset(pad31 + 13, 0x7a, 31);
+	datum_test(datum_protocol_coinbaser_fetch_response((int)sizeof(pad31), pad31) == 1);
+	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_a));
+	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_b));
+	
+	fill_stock_coinbaser(pad32, sizeof(pad32), value);
+	memset(pad32 + 13, 0x7a, 32);
+	datum_test(datum_protocol_coinbaser_fetch_response((int)sizeof(pad32), pad32) == 1);
+	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_a));
+	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_b));
+	
+	fill_stock_coinbaser(pad100, sizeof(pad100), value);
+	memset(pad100 + 13, 0x7a, 100);
+	datum_test(datum_protocol_coinbaser_fetch_response((int)sizeof(pad100), pad100) == 1);
+	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_a));
+	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_b));
+	
+	/* Magic + parent binds the reply to that prevhash. */
+	fill_stock_coinbaser(magicked, sizeof(magicked), value);
+	memcpy(magicked + 13, DATUM_COINBASER_PREVHASH_MAGIC, DATUM_COINBASER_PREVHASH_MAGIC_LEN);
+	memcpy(magicked + 13 + DATUM_COINBASER_PREVHASH_MAGIC_LEN, parent_a, 32);
+	datum_test(datum_protocol_coinbaser_fetch_response((int)sizeof(magicked), magicked) == 1);
 	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_a));
 	datum_test(!datum_protocol_coinbaser_reply_is_for_job(value, parent_b));
+	
+	memcpy(magicked + 13 + DATUM_COINBASER_PREVHASH_MAGIC_LEN, parent_b, 32);
+	datum_test(datum_protocol_coinbaser_fetch_response((int)sizeof(magicked), magicked) == 1);
+	datum_test(!datum_protocol_coinbaser_reply_is_for_job(value, parent_a));
+	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_b));
+	
+	/* Wrong magic + 32 bytes: ignore the tail, same as stock. */
+	fill_stock_coinbaser(wrong, sizeof(wrong), value);
+	memcpy(wrong + 13, "XXXX", DATUM_COINBASER_PREVHASH_MAGIC_LEN);
+	memcpy(wrong + 13 + DATUM_COINBASER_PREVHASH_MAGIC_LEN, parent_a, 32);
+	datum_test(datum_protocol_coinbaser_fetch_response((int)sizeof(wrong), wrong) == 1);
+	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_a));
+	datum_test(datum_protocol_coinbaser_reply_is_for_job(value, parent_b));
 }
 
 void datum_protocol_tests(void) {

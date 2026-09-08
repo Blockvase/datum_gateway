@@ -1330,11 +1330,16 @@ int datum_protocol_coinbaser_fetch_response(int len, unsigned char *data) {
 	memcpy(datum_coinbaser_v2_response, &data[12], x);
 	datum_coinbaser_v2_response_value[datum_coinbaser_v2_response_buf_idx] = v;
 	datum_coinbaser_v2_response_len[datum_coinbaser_v2_response_buf_idx] = x;
-	// Optional trailer after the blob: the request prevhash. Stock OCEAN/CONVOY
-	// replies are value + blob only. Prime appends 32 bytes so a late reply
-	// for the same sat value cannot bind to a different tip.
-	if ((unsigned int)len >= 12u + x + 32u) {
-		memcpy(datum_coinbaser_v2_response_prevhash[datum_coinbaser_v2_response_buf_idx], &data[12 + x], 32);
+	// Optional trailer after the blob: magic + request prevhash. Stock
+	// OCEAN/CONVOY replies are value + blob only. Take the trailer only
+	// when the tail is at least 36 bytes and the four bytes at the blob
+	// edge match; anything else, any tail length, is no prevhash. A
+	// padding server then collides once in 2^32 instead of every time.
+	if ((unsigned int)len >= 12u + x + DATUM_COINBASER_PREVHASH_TRAILER_LEN
+	    && memcmp(&data[12 + x], DATUM_COINBASER_PREVHASH_MAGIC,
+		      DATUM_COINBASER_PREVHASH_MAGIC_LEN) == 0) {
+		memcpy(datum_coinbaser_v2_response_prevhash[datum_coinbaser_v2_response_buf_idx],
+		       &data[12 + x + DATUM_COINBASER_PREVHASH_MAGIC_LEN], 32);
 		datum_coinbaser_v2_response_has_prevhash[datum_coinbaser_v2_response_buf_idx] = true;
 	} else {
 		datum_coinbaser_v2_response_has_prevhash[datum_coinbaser_v2_response_buf_idx] = false;
@@ -1386,7 +1391,7 @@ int datum_protocol_coinbaser_fetch(void *sptr) {
 	// receive thread cannot store and signal a reply before this thread is waiting for it.
 	// The send only appends to the outgoing buffer; it never blocks on the socket.
 	// CONVOY #9: take the lock before send; wait for this job's value, not any wakeup.
-	// If the reply carries a prevhash trailer, require that too.
+	// If the reply carries a magic prevhash trailer, require that too.
 	pthread_mutex_lock(&datum_protocol_coinbaser_fetch_mutex);
 	datum_coinbaser_v2_response = NULL;
 

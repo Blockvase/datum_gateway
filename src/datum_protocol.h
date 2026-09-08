@@ -56,6 +56,13 @@
 #define DATUM_PROTOCOL_VERSION "v0.4.1-beta" // this is sent to the server as a UA
 #define DATUM_PROTOCOL_CONNECT_TIMEOUT 30
 
+/* Optional 0x11 trailer after the coinbaser blob: 4-byte magic then the
+ * 32-byte request prevhash. Bytes are not all equal so a repeated-byte
+ * pad cannot match. Stock OCEAN/CONVOY replies stay value + blob. */
+#define DATUM_COINBASER_PREVHASH_MAGIC "CBPH"
+#define DATUM_COINBASER_PREVHASH_MAGIC_LEN 4
+#define DATUM_COINBASER_PREVHASH_TRAILER_LEN 36
+
 #define DATUM_PROTOCOL_MAX_CMD_DATA_SIZE 4194304 // 2^22 - protocol limit!
 #define DATUM_PROTOCOL_BUFFER_SIZE (DATUM_PROTOCOL_MAX_CMD_DATA_SIZE*3)
 #define DATUM_PROTOCOL_MAX_USERNAME_LEN 384
