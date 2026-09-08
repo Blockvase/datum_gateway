@@ -298,6 +298,88 @@ static void datum_blake2b_coinbase_selection_tests(void) {
 	free(sdata);
 }
 
+static void datum_blake2b_quickdiff_coinbase_tests(void) {
+	T_DATUM_THREAD_DATA *thread = calloc(1, sizeof(*thread));
+	T_DATUM_STRATUM_THREADPOOL_DATA *sdata = calloc(1, sizeof(*sdata));
+	T_DATUM_CLIENT_DATA client = {0};
+	T_DATUM_MINER_DATA miner = {0};
+	T_DATUM_STRATUM_JOB job = {0};
+	T_DATUM_TEMPLATE_DATA tdata = {0};
+	T_DATUM_STRATUM_JOB *saved_job = global_cur_stratum_jobs[0];
+	const int saved_active = atomic_load(&datum_protocol_client_active);
+	static const struct {
+		bool ready, quickdiff;
+		const char *job_id;
+	} cases[] = {
+		{false, false, "N0000000000c0deff"},
+		{false, true, "Q0000000000c0deff"},
+		{true, true, "Q0000000000c0de04"},
+	};
+	static const char expected[] =
+		"{\"error\":[23,\"H-not-zero\",null],\"id\":42,\"result\":null}\n";
+
+	if (!datum_test(thread && sdata)) {
+		free(thread);
+		free(sdata);
+		return;
+	}
+	thread->app_thread_data = sdata;
+	client.datum_thread = thread;
+	client.app_client_data = &miner;
+	miner.sdata = sdata;
+	sdata->cur_stratum_job = &job;
+	job.block_template = &tdata;
+	job.job_state = JOB_STATE_FULL_PRIORITY_WAIT_COINBASER;
+	strcpy(job.job_id, "0000000000c0de");
+	strcpy(job.version, "20000000");
+	job.subsidy_only_coinbase.coinb1_len = 1;
+	job.subsidy_only_coinbase.coinb1_bin[0] = 0xff;
+	job.coinbase[COINBASE_TYPE_YUGE] = job.subsidy_only_coinbase;
+	tdata.curtime = 1000;
+	tdata.version = 0x20000000;
+	tdata.bits_uint = 0x1d00ffff;
+	datum_stratum_job_refresh_blake2b(&job);
+	global_cur_stratum_jobs[0] = &job;
+	atomic_store(&datum_protocol_client_active, 3);
+	if (!datum_protocol_is_active()) {
+		unsigned char notice[36] = {DATUM_ABW_DRAFT_REVISION, DATUM_ABW_ASSIGNMENT_ACTIVE, 0};
+		memset(notice + 3, 0x5a, 32);
+		notice[35] = 0xfe;
+		datum_test(datum_protocol_abw_assignment_notice(sizeof(notice), notice) == 1);
+	}
+	datum_test(datum_protocol_is_active());
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+		sdata->full_coinbase_ready = cases[i].ready;
+		miner.current_diff = miner.last_sent_diff = 2ULL << i;
+		miner.stratum_job_diffs[0] = 1;
+		client.out_buf = 0;
+		datum_test(send_mining_notify(&client, true, cases[i].quickdiff, false) == 0);
+		json_t *notify = json_loadb(client.w_buffer, client.out_buf, 0, NULL);
+		const char *job_id = json_string_value(json_array_get(json_object_get(notify, "params"), 0));
+		if (datum_test(job_id != NULL)) {
+			datum_test(!strcmp(job_id, cases[i].job_id));
+			datum_test(miner.quickdiff_active == cases[i].quickdiff);
+			datum_test(miner.stratum_job_diffs[0] == (cases[i].quickdiff ? 1 : miner.last_sent_diff));
+			if (cases[i].quickdiff) datum_test(miner.quickdiff_value == miner.last_sent_diff);
+			json_t *params = json_pack("[sssss]", "miner", job_id,
+				"0000000000000000", "00000000", "00000000");
+			client.out_buf = 0;
+			datum_test(client_mining_submit(&client, 42, params) == 0);
+			// The advertised job must reach proof validation, not unknown-work.
+			datum_test(client.out_buf == (int)strlen(expected));
+			datum_test(!memcmp(client.w_buffer, expected, strlen(expected)));
+			json_decref(params);
+		}
+		json_decref(notify);
+	}
+	datum_protocol_abw_reset();
+	atomic_store(&datum_protocol_client_active, saved_active);
+	global_cur_stratum_jobs[0] = saved_job;
+	free(thread);
+	free(sdata);
+}
+
 static void datum_stratum_abw_block_request_tests(void) {
 	unsigned char xor_key[16];
 	unsigned char raw_hash[32], masked_hash[32];
@@ -588,6 +670,7 @@ void datum_stratum_tests(void) {
 	datum_stratum_minimum_difficulty_configure_tests();
 	datum_stratum_string_request_id_tests();
 	datum_blake2b_coinbase_selection_tests();
+	datum_blake2b_quickdiff_coinbase_tests();
 	datum_blake2b_h_not_zero_tests();
 	datum_blake2b_malformed_submit_job_tests();
 	datum_blake2b_client_pot_commitment_tests();

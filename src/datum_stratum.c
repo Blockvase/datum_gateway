@@ -1126,6 +1126,11 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 	
 	// need to build the full coinbase txn
 	coinbase_index = job_id_bin[7];
+	// Quick difficulty jobs use Q instead of N; the empty coinbase index
+	// still identifies subsidy-only work while the coinbaser is pending.
+	if (quickdiff && coinbase_index == DATUM_COINBASE_ID_EMPTY) {
+		empty_work = true;
+	}
 	if (coinbase_index >= MAX_COINBASE_TYPES) {
 		if (!(empty_work && coinbase_index == DATUM_COINBASE_ID_EMPTY)) {
 			send_unknown_work_error(c, id);
