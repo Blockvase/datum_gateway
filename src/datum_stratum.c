@@ -966,6 +966,17 @@ static void stratum_note_share(T_DATUM_MINER_DATA *m, bool accepted, uint64_t di
 	}
 }
 
+// Name the client behind a block for the log. Used by the local path
+// below and by the ABW reveal in datum_protocol.c. The username comes
+// straight from mining.submit, so it is filtered here; the user agent was
+// already filtered by strncpy_uachars at subscribe.
+void datum_stratum_describe_block_finder(char *out, size_t outsz, const T_DATUM_CLIENT_DATA *c, const char *username, bool empty_work) {
+	const T_DATUM_MINER_DATA * const m = c->app_client_data;
+	char who[192];
+	strncpy_printable(who, username ? username : "NULL", sizeof(who));
+	snprintf(out, outsz, "%s from %s (client %d/%d, session %08x, agent %s%s)", who, c->rem_host, c->datum_thread->thread_id, c->cid, m->sid, m->useragent[0] ? m->useragent : "unknown", empty_work ? ", on empty work" : "");
+}
+
 int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj) {
 	// {"params": ["username", "job", "extranonce2", "time", "nonce"], "id": 1, "method": "mining.submit"}
 	// 0 = username
@@ -1005,6 +1016,7 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 	unsigned char coinbase_index = 0;
 	T_DATUM_STRATUM_COINBASE *cb = NULL;
 	unsigned char extranonce_bin[12];
+	unsigned char job_id_bin[8];
 	
 	unsigned char block_header[80];
 	unsigned char share_hash[40];
@@ -1046,6 +1058,11 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 			return 0;
 		}
 	}
+	if (!hex_to_bin_exact(job_id_s, job_id_bin, sizeof(job_id_bin))) {
+		send_unknown_work_error(c,id);
+		stratum_note_share(m, false, m->last_sent_diff); // guestimate here
+		return 0;
+	}
 	
 	// jobID is
 	// 4 bytes time (who cares)
@@ -1054,7 +1071,7 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 	// 1 byte coinbase index used
 	// 6625a3d53cc0e500
 	// 0123456789ABCDEF
-	g_job_index = (hex2bin_uchar(&job_id_s[0xA])<<8) | hex2bin_uchar(&job_id_s[0xC]);
+	g_job_index = (job_id_bin[5]<<8) | job_id_bin[6];
 	g_job_index ^= STRATUM_JOB_INDEX_XOR;
 	if (g_job_index >= MAX_STRATUM_JOBS) {
 		send_unknown_work_error(c,id);
@@ -1101,12 +1118,14 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 		stratum_note_share(m, false, job_diff);
 		return 0;
 	}
-	for(i=0;i<8;i++) {
-		extranonce_bin[i+4] = hex2bin_uchar(&extranonce2_s[i<<1]);
+	if (!hex_to_bin_exact(extranonce2_s, extranonce_bin + 4, 8)) {
+		send_unknown_work_error(c, id);
+		stratum_note_share(m, false, job_diff);
+		return 0;
 	}
 	
 	// need to build the full coinbase txn
-	coinbase_index = hex2bin_uchar(&job_id_s[0xE]);
+	coinbase_index = job_id_bin[7];
 	if (coinbase_index >= MAX_COINBASE_TYPES) {
 		if (!(empty_work && coinbase_index == DATUM_COINBASE_ID_EMPTY)) {
 			send_unknown_work_error(c, id);
@@ -1169,10 +1188,18 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 		return 0;
 	}
 	if (ntime_len == 8) {
-		ntime_val = (uint32_t)strtoul(ntime_s, NULL, 16);
+		if (!hex_to_u32(ntime_s, &ntime_val)) {
+			send_unknown_work_error(c, id);
+			stratum_note_share(m, false, job_diff);
+			return 0;
+		}
 		pk_u32le(ntime8, 0, ntime_val);
 	} else {
-		for(i=0;i<8;i++) ntime8[i] = hex2bin_uchar(&ntime_s[i << 1]);
+		if (!hex_to_bin_exact(ntime_s, ntime8, 8)) {
+			send_unknown_work_error(c, id);
+			stratum_note_share(m, false, job_diff);
+			return 0;
+		}
 		ntime_val = upk_u32le(ntime8, 0);
 	}
 	ntime64 = upk_u64le(ntime8, 0);
@@ -1197,10 +1224,18 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 		return 0;
 	}
 	if (nonce_len == 8) {
-		nonce_val = (uint32_t)strtoul(nonce_s, NULL, 16);
+		if (!hex_to_u32(nonce_s, &nonce_val)) {
+			send_unknown_work_error(c, id);
+			stratum_note_share(m, false, job_diff);
+			return 0;
+		}
 		pk_u32le(nonce8, 0, nonce_val);
 	} else {
-		for(i=0;i<8;i++) nonce8[i] = hex2bin_uchar(&nonce_s[i << 1]);
+		if (!hex_to_bin_exact(nonce_s, nonce8, 8)) {
+			send_unknown_work_error(c, id);
+			stratum_note_share(m, false, job_diff);
+			return 0;
+		}
 		nonce_val = upk_u32le(nonce8, 0);
 	}
 	nonce64 = upk_u64le(nonce8, 0);
@@ -1219,7 +1254,7 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 		stratum_note_share(m, false, job_diff);
 		return 0;
 	}
-	datum_blake2b_build_work_header(work, job->prevhash_bin, nonce8, ntime8, root);
+	datum_blake2b_build_work_header_from_hidden(work, job->blake2b_prevblock_hidden, nonce8, ntime8, root);
 	memcpy(block_header, work, 80);
 	if (!datum_blake2b_pow_hash_le(share_hash, work, (const unsigned char[16]){0}, 0)) {
 		send_unknown_work_error(c, id);
@@ -1261,6 +1296,11 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 		DLOG_WARN("************************************************************************************************");
 		DLOG_WARN("******** BLOCK FOUND - %s ********", new_notify_blockhash);
 		DLOG_WARN("************************************************************************************************");
+		{
+			char finder[320];
+			datum_stratum_describe_block_finder(finder, sizeof(finder), c, username_s, empty_work);
+			DLOG_WARN("Block %s at height %llu found by %s", new_notify_blockhash, (unsigned long long)job->height, finder);
+		}
 		
 		if (job->is_datum_job) {
 			(void)datum_protocol_pow_submit(c, job, username_s, true,
@@ -1451,18 +1491,19 @@ int client_mining_authorize(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 }
 
 // The coinbase a BLAKE2b job commits to, the same for every miner: the
-// subsidy-only one for new-block work, COINBASE_TYPE_TINY (pays only the pool)
-// while the job state is below JOB_STATE_FULL_PRIORITY_WAIT_COINBASER or
-// full_coinbase_ready is unset, and COINBASE_TYPE_YUGE after that. The classes
-// were sized to what SHA256d firmware could accept (see the COINBASE_TYPE_
-// defines); on BLAKE2b work the miner never receives the coinbase, so there is
-// no per-miner selection.
+// subsidy-only one for new-block work and while the coinbaser is late on a
+// pooled connection (CONVOY #13: do not pair class 0 with a full template),
+// COINBASE_TYPE_TINY only when solo, and COINBASE_TYPE_YUGE after the
+// coinbaser is ready (CONVOY #10). On BLAKE2b the miner never receives the
+// coinbase, so there is no per-miner selection.
 unsigned int datum_stratum_coinbase_index(
 	const T_DATUM_STRATUM_THREADPOOL_DATA *sdata, bool new_block) {
 	if (new_block) return DATUM_COINBASE_ID_EMPTY;
 	if (!sdata || !sdata->cur_stratum_job ||
 	    sdata->cur_stratum_job->job_state < JOB_STATE_FULL_PRIORITY_WAIT_COINBASER ||
-	    !sdata->full_coinbase_ready) return 0;
+	    !sdata->full_coinbase_ready) {
+		return datum_protocol_is_active() ? DATUM_COINBASE_ID_EMPTY : 0;
+	}
 	return COINBASE_TYPE_YUGE;
 }
 
@@ -2008,7 +2049,6 @@ bool datum_stratum_job_blake2b_commitment(T_DATUM_STRATUM_JOB *s, const T_DATUM_
 
 void datum_stratum_job_refresh_blake2b(T_DATUM_STRATUM_JOB *s) {
 	T_DATUM_TEMPLATE_DATA *block_template;
-	unsigned char prevblock_hidden[32];
 	uint32_t time_on_wire;
 	int i;
 
@@ -2034,10 +2074,10 @@ void datum_stratum_job_refresh_blake2b(T_DATUM_STRATUM_JOB *s) {
 	}
 	s->blake2b_time_on_wire = time_on_wire;
 
-	datum_blake2b_prevblock_hidden(prevblock_hidden, block_template->previousblockhash_bin);
+	datum_blake2b_prevblock_hidden(s->blake2b_prevblock_hidden, block_template->previousblockhash_bin);
 
 	for(i=0;i<32;i++) {
-		uchar_to_hex(&s->prevhash[i << 1], prevblock_hidden[i]);
+		uchar_to_hex(&s->prevhash[i << 1], s->blake2b_prevblock_hidden[i]);
 	}
 	s->prevhash[64] = 0;
 }
@@ -2295,7 +2335,6 @@ int assembleBlockAndSubmit(uint8_t *block_header, uint8_t *coinbase_txn, size_t 
 	CURL *tcurl;
 	int ret = 0;
 	bool free_submitblock_req = false;
-	char *s = NULL;
 	unsigned char v2hdr[DATUM_BLAKE2B_BLOCK_HEADER_SIZE];
 	unsigned char merkle[32];
 	unsigned char en[12];
@@ -2418,32 +2457,8 @@ int assembleBlockAndSubmit(uint8_t *block_header, uint8_t *coinbase_txn, size_t 
 	// make the call!
 	r = bitcoind_json_rpc_call(tcurl, &datum_config, submitblock_req);
 	curl_easy_cleanup(tcurl);
-	if (!r) {
-		// Didn't get a usable response at all: either the request never reached the node, or it
-		// returned something we couldn't parse as a valid JSON-RPC reply, or a genuine top-level
-		// JSON-RPC error occurred. In every case we genuinely don't know if the block was
-		// accepted -- don't claim success. The dedicated submitblock thread triggered above is
-		// still independently submitting this same block.
-		DLOG_ERROR("Did not get a valid response submitting block %s! It may or may not have been accepted -- check your node!", block_hash_hex);
-		ret = 0;
-	} else {
-		json_t * const res_val = json_object_get(r, "result");
-		if (json_is_null(res_val)) {
-			// a null result means success here
-			DLOG_INFO("Block %s submitted to upstream node successfully!",block_hash_hex);
-			ret = 1;
-		} else {
-			s = json_dumps(res_val, JSON_ENCODE_ANY);
-			if (!s) {
-				DLOG_WARN("Upstream node rejected our block! (unknown)");
-			} else {
-				DLOG_WARN("Upstream node rejected our block! (%s)",s);
-				free(s);
-			}
-			ret = 0;
-		}
-		json_decref(r);
-	}
+	ret = datum_submitblock_log_reply(r, block_hash_hex) ? 1 : 0;
+	if (r) json_decref(r);
 	
 	// cleanup
 	if (free_submitblock_req) {

@@ -85,6 +85,7 @@ void datum_utils_init(void) {
 #ifdef __GNUC__
 // faster, less portable
 uint64_t roundDownToPowerOfTwo_64(uint64_t x) {
+	if (x == 0) return 0; // __builtin_clzll(0) is undefined (CONVOY #12)
 	return 1ULL << (63 - __builtin_clzll(x));
 }
 
@@ -356,6 +357,33 @@ void hex_to_bin(const char *hex, unsigned char *bin) {
 	}
 }
 
+static int hex_value(const char c) {
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+bool hex_to_bin_exact(const char *hex, unsigned char *bin, const size_t bin_len) {
+	int high, low;
+	if (!hex || !bin) return false;
+	for (size_t i = 0; i < bin_len; i++) {
+		high = hex_value(hex[i<<1]);
+		low = hex_value(hex[(i<<1)+1]);
+		if (high < 0 || low < 0) return false;
+		bin[i] = (unsigned char)((high << 4) | low);
+	}
+	return hex[bin_len<<1] == 0;
+}
+
+bool hex_to_u32(const char *hex, uint32_t *out) {
+	unsigned char bin[4];
+	if (!out || !hex_to_bin_exact(hex, bin, sizeof(bin))) return false;
+	*out = ((uint32_t)bin[0] << 24) | ((uint32_t)bin[1] << 16) |
+		((uint32_t)bin[2] << 8) | bin[3];
+	return true;
+}
+
 void panic_from_thread(int a) {
 	// set panic flag
 	panic_mode = 1;
@@ -577,6 +605,25 @@ bool strncpy_workerchars(char *out, const char *in, size_t maxlen) {
 		i++;
 	}
 	out[j] = 0;
+	return true;
+}
+
+bool strncpy_printable(char *out, const char *in, size_t maxlen) {
+	// copy a string from in to out for the log, replacing anything outside
+	// printable ASCII with '?' so a client cannot put line breaks or terminal
+	// escapes into the log
+	// copy a max of maxlen-1 chars from in to out
+	size_t i = 0;
+
+	if (in == NULL || out == NULL || maxlen == 0) {
+		return false;
+	}
+
+	for (; in[i] != 0 && i + 1 < maxlen; i++) {
+		const unsigned char c = (unsigned char)in[i];
+		out[i] = (c >= 0x20 && c <= 0x7e) ? (char)c : '?';
+	}
+	out[i] = 0;
 	return true;
 }
 

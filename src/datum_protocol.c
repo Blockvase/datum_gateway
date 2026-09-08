@@ -174,7 +174,7 @@ static atomic_bool datum_pool_abw_enabled = true;
 extern DATUM_QUEUE pow_queue;
 
 // may be used by this thread when crafting replies to server commands
-unsigned char temp_data[DATUM_PROTOCOL_MAX_CMD_DATA_SIZE + 16384];
+unsigned char temp_data[DATUM_PROTOCOL_TEMP_DATA_SIZE];
 
 unsigned char datum_protocol_setup_new_job_idx(void *sx) {
 	// Called by the stratum job updater.  Must be thread safe.
@@ -202,10 +202,6 @@ unsigned char datum_protocol_setup_new_job_idx(void *sx) {
 	return a;
 }
 
-static inline void datum_xor_header_key(void *h, uint32_t key) {
-	*((uint32_t *)h) ^= key;
-}
-
 uint32_t datum_header_xor_feedback(const uint32_t i) {
 	uint32_t s = 0xb10cfeed;
 	uint32_t h = s;
@@ -223,6 +219,30 @@ uint32_t datum_header_xor_feedback(const uint32_t i) {
 	h *= 0xc2b2ae35;
 	h ^= h >> 16;
 	return h;
+}
+
+void datum_header_pk(uint8_t * const dst, const size_t offset, const T_DATUM_PROTOCOL_HEADER * const h, uint32_t * const xor_key) {
+	uint32_t raw = (h->cmd_len & 0x3fffffUL) |
+		((uint32_t)h->is_signed << 24) |
+		((uint32_t)h->is_encrypted_pubkey << 25) |
+		((uint32_t)h->is_encrypted_channel << 26) |
+		((uint32_t)(h->proto_cmd & 0x1f) << 27);
+	raw ^= *xor_key;
+	*xor_key = datum_header_xor_feedback(*xor_key);
+	
+	pk_u32le(dst, offset, raw);
+}
+
+void datum_header_upk(T_DATUM_PROTOCOL_HEADER * const h, const uint8_t * const src, const size_t offset, uint32_t * const xor_key) {
+	uint32_t raw = upk_u32le(src, offset);
+	raw ^= *xor_key;
+	*xor_key = datum_header_xor_feedback(*xor_key);
+	
+	h->cmd_len = raw & 0x003fffffUL;
+	h->is_signed = raw & 0x01000000UL;
+	h->is_encrypted_pubkey = raw & 0x02000000UL;
+	h->is_encrypted_channel = raw & 0x04000000UL;
+	h->proto_cmd = (raw >> 27) & 0x1f;
 }
 
 // Take the hexidecimal public key string and store it in a DATUM_ENC_KEYS
@@ -312,7 +332,7 @@ static int datum_protocol_encrypted_cmd(uint8_t proto_cmd, const void *data,
 	h.proto_cmd = proto_cmd;
 	h.cmd_len = len;
 	h.cmd_len += crypto_box_MACBYTES;
-	const size_t frame_size = sizeof(T_DATUM_PROTOCOL_HEADER) +
+	const size_t frame_size = T_DATUM_PROTOCOL_HEADER_WIRE_BYTES +
 		(size_t)len + crypto_box_MACBYTES;
 	if (frame_size >= DATUM_PROTOCOL_BUFFER_SIZE) return -1;
 	
@@ -331,16 +351,13 @@ static int datum_protocol_encrypted_cmd(uint8_t proto_cmd, const void *data,
 	}
 	
 	unsigned char *encrypted = server_send_buffer + server_out_buf +
-		sizeof(T_DATUM_PROTOCOL_HEADER);
+		T_DATUM_PROTOCOL_HEADER_WIRE_BYTES;
 	crypto_box_easy_afternm(encrypted, data, len, session_nonce_sender,
 		session_precomp.precomp_remote);
 	//DLOG_DEBUG("mining cmd 5--- len %d, send header key %8.8x, raw %8.8lx", h.cmd_len, sending_header_key, (unsigned long)upk_u32le(h, 0));
-	datum_xor_header_key(&h, sending_header_key);
-	sending_header_key = datum_header_xor_feedback(sending_header_key);
+	datum_header_pk(server_send_buffer, server_out_buf, &h, &sending_header_key);
 	datum_increment_session_nonce(session_nonce_sender);
-	memcpy(server_send_buffer + server_out_buf, &h,
-		sizeof(T_DATUM_PROTOCOL_HEADER));
-	server_out_buf += sizeof(T_DATUM_PROTOCOL_HEADER);
+	server_out_buf += T_DATUM_PROTOCOL_HEADER_WIRE_BYTES;
 	server_out_buf += len + crypto_box_MACBYTES;
 	pthread_mutex_unlock(&datum_protocol_send_buffer_lock);
 	pthread_mutex_unlock(&datum_protocol_sender_stage1_lock);
@@ -637,6 +654,8 @@ typedef struct {
 	T_DATUM_ABW_TEMPLATE *block_template;
 	bool subsidy_only;
 	bool pool_handled;
+	char finder[DATUM_ABW_FINDER_LEN];
+	uint64_t height;
 } T_DATUM_ABW_PENDING;
 
 static pthread_mutex_t datum_abw_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -783,11 +802,13 @@ static bool datum_protocol_abw_template_matches_source(
 }
 
 // Caller holds datum_abw_mutex and transfers ownership of coinbase.
+// finder describes the client for the log and is copied.
 static void datum_protocol_abw_populate_pending(
 	T_DATUM_ABW_PENDING *pending, T_DATUM_ABW_TEMPLATE *block_template,
 	const T_DATUM_PROTOCOL_POW *pow, unsigned char *coinbase,
 	size_t coinbase_size, const unsigned char raw_pow_hash[32],
-	const unsigned char block_header[DATUM_BLAKE2B_BLOCK_HEADER_SIZE]) {
+	const unsigned char block_header[DATUM_BLAKE2B_BLOCK_HEADER_SIZE],
+	const char *finder) {
 	pending->assignment_id = pow->abw_assignment_id;
 	pending->nonce = (uint32_t)pow->nonce;
 	pending->target_pot = pow->target_byte;
@@ -798,6 +819,8 @@ static void datum_protocol_abw_populate_pending(
 		DATUM_BLAKE2B_BLOCK_HEADER_SIZE);
 	pending->coinbase = coinbase;
 	pending->coinbase_size = coinbase_size;
+	snprintf(pending->finder, sizeof(pending->finder), "%s", finder ? finder : "");
+	pending->height = pow->sjob->height;
 	pending->block_template = block_template;
 	pending->subsidy_only = pow->subsidy_only;
 	if (block_template) block_template->refs++;
@@ -805,7 +828,7 @@ static void datum_protocol_abw_populate_pending(
 
 bool datum_protocol_abw_cache_candidate(const T_DATUM_PROTOCOL_POW *pow,
 	const unsigned char *full_cb_tx, size_t full_cb_tx_size,
-	const unsigned char *raw_pow_hash) {
+	const unsigned char *raw_pow_hash, const char *finder) {
 	static const unsigned char no_xor_key[16] = {0};
 	if (!pow || !pow->sjob || !pow->sjob->block_template ||
 	    !full_cb_tx || !raw_pow_hash || !pow->abw_assignment_id ||
@@ -868,13 +891,13 @@ bool datum_protocol_abw_cache_candidate(const T_DATUM_PROTOCOL_POW *pow,
 	}
 	if (pending && block_template) {
 		datum_protocol_abw_populate_pending(pending, block_template, pow,
-			coinbase, full_cb_tx_size, raw_pow_hash, block_header);
+			coinbase, full_cb_tx_size, raw_pow_hash, block_header, finder);
 		pthread_mutex_unlock(&datum_abw_mutex);
 		return true;
 	}
 	if (pending && pow->subsidy_only) {
 		datum_protocol_abw_populate_pending(pending, NULL, pow,
-			coinbase, full_cb_tx_size, raw_pow_hash, block_header);
+			coinbase, full_cb_tx_size, raw_pow_hash, block_header, finder);
 		pthread_mutex_unlock(&datum_abw_mutex);
 		return true;
 	}
@@ -967,7 +990,7 @@ bool datum_protocol_abw_cache_candidate(const T_DATUM_PROTOCOL_POW *pow,
 	}
 	free(transactions_hex);
 	datum_protocol_abw_populate_pending(pending, block_template, pow,
-		coinbase, full_cb_tx_size, raw_pow_hash, block_header);
+		coinbase, full_cb_tx_size, raw_pow_hash, block_header, finder);
 	pthread_mutex_unlock(&datum_abw_mutex);
 	return true;
 }
@@ -1083,7 +1106,7 @@ int datum_protocol_abw_assignment_notice(int len, unsigned char *data) {
 static char *datum_protocol_abw_take_revealed_candidate_locked(
 	uint8_t assignment_id, const unsigned char xor_key[16],
 	const unsigned char expected_pow_hash[32], char block_hash[65],
-	bool *pool_handled) {
+	bool *pool_handled, char *finder, size_t finder_size, uint64_t *height) {
 	for (size_t i = 0; i < DATUM_ABW_PENDING_CACHE; ++i) {
 		T_DATUM_ABW_PENDING *pending = &datum_abw_pending[i];
 		if (pending->assignment_id != assignment_id) continue;
@@ -1133,6 +1156,10 @@ static char *datum_protocol_abw_take_revealed_candidate_locked(
 			pending->raw_pow_hash, pending->xor_clear_bits, xor_key,
 			actual_pow_hash, block_hash)) {
 			if (pool_handled) *pool_handled = pending->pool_handled;
+			if (finder && finder_size) {
+				snprintf(finder, finder_size, "%s", pending->finder);
+			}
+			if (height) *height = pending->height;
 			datum_protocol_abw_pending_clear(pending);
 			return candidate;
 		}
@@ -1185,11 +1212,18 @@ int datum_protocol_abw_reveal(int len, unsigned char *data) {
 	while (true) {
 		char block_hash[65] = {0};
 		bool pool_handled = false;
+		char finder[DATUM_ABW_FINDER_LEN] = "";
+		uint64_t height = 0;
 		pthread_mutex_lock(&datum_abw_mutex);
 		char *block_request = datum_protocol_abw_take_revealed_candidate_locked(
-			assignment_id, data + 2, NULL, block_hash, &pool_handled);
+			assignment_id, data + 2, NULL, block_hash, &pool_handled, finder,
+			sizeof(finder), &height);
 		pthread_mutex_unlock(&datum_abw_mutex);
 		if (!block_request) break;
+		if (finder[0]) {
+			DLOG_WARN("Block %s at height %llu found by %s", block_hash,
+				(unsigned long long)height, finder);
+		}
 		if (datum_config.mining_abw_verify_all_shares_on_disclosure &&
 		    !pool_handled) {
 			ignored_block = true;
@@ -1327,26 +1361,38 @@ int datum_protocol_coinbaser_fetch(void *sptr) {
 		return 0;
 	}
 	
-	if (datum_protocol_mining_cmd_for_session(
-		msg, i, session_generation) != 0) return 0;
-	
-	// spin here for up to 5 seconds while awaiting a coinbaser response from the DATUM server
-	clock_gettime(CLOCK_REALTIME, &ts);
-	ts.tv_sec += 5; // Set timeout to 5 seconds
-	
+	// Hold the mutex from before the request goes out until the reply is consumed, so the
+	// receive thread cannot store and signal a reply before this thread is waiting for it.
+	// The send only appends to the outgoing buffer; it never blocks on the socket.
+	// CONVOY #9: take the lock before send; wait for this job's value, not any wakeup.
 	pthread_mutex_lock(&datum_protocol_coinbaser_fetch_mutex);
-	
-	rc = pthread_cond_timedwait(&datum_protocol_coinbaser_fetch_cond, &datum_protocol_coinbaser_fetch_mutex, &ts);
-	if (rc == ETIMEDOUT) {
+	datum_coinbaser_v2_response = NULL;
+
+	if (datum_protocol_mining_cmd_for_session(
+		msg, i, session_generation) != 0) {
 		pthread_mutex_unlock(&datum_protocol_coinbaser_fetch_mutex);
-		DLOG_DEBUG("Timeout waiting for coinbaser response from DATUM server");
 		return 0;
 	}
-	
-	if (rc != 0) {
-		DLOG_DEBUG("Error waiting for coinbaser response from DATUM server");
-		pthread_mutex_unlock(&datum_protocol_coinbaser_fetch_mutex);
-		return 0;
+
+	// wait here for up to 5 seconds for a coinbaser response from the DATUM server
+	clock_gettime(CLOCK_REALTIME, &ts);
+	ts.tv_sec += 5; // Set timeout to 5 seconds
+
+	// Loop on the reply for this job's value: a stale reply or a spurious wakeup is not the answer.
+	while ((!datum_coinbaser_v2_response) ||
+	       (datum_coinbaser_v2_response_value[datum_coinbaser_v2_response_buf_idx] != value)) {
+		rc = pthread_cond_timedwait(&datum_protocol_coinbaser_fetch_cond, &datum_protocol_coinbaser_fetch_mutex, &ts);
+		if (rc == ETIMEDOUT) {
+			pthread_mutex_unlock(&datum_protocol_coinbaser_fetch_mutex);
+			DLOG_DEBUG("Timeout waiting for coinbaser response from DATUM server");
+			return 0;
+		}
+
+		if (rc != 0) {
+			DLOG_DEBUG("Error waiting for coinbaser response from DATUM server");
+			pthread_mutex_unlock(&datum_protocol_coinbaser_fetch_mutex);
+			return 0;
+		}
 	}
 	i = 0;
 	
@@ -1469,7 +1515,8 @@ err:
 	return 1;
 }
 
-int datum_protocol_job_validation_stxlist(unsigned char *data) {
+int datum_protocol_job_validation_stxlist(int len, unsigned char *data) {
+	if (len < 1) return 0;
 	// similar to compact blocks, we're going to send a list of short transaction IDs for the requested job
 	unsigned char job_index = data[0];
 	T_DATUM_PROTOCOL_JOB *dj;
@@ -1634,9 +1681,17 @@ int datum_protocol_job_validation_stxlist(unsigned char *data) {
 	return 1;
 }
 
-int datum_protocol_job_validation_stxlist_byid(unsigned char *data) {
+// The 0x50 0x11 reply is built in temp_data and sent as one command, so it
+// must stay under what datum_protocol_bulk_cmd accepts with room for the 0xFE
+// terminator and up to 111 bytes of padding appended after the loop.
+bool datum_protocol_stxlist_reply_fits(size_t offset, size_t txn_size) {
+	return offset + 3 + txn_size <= DATUM_STXLIST_REPLY_MAX;
+}
+
+int datum_protocol_job_validation_stxlist_byid(int len, unsigned char *data) {
 	// the server is requesting missing transactions
 	// send them
+	if (len < 3) return 0;
 	unsigned char job_index = data[0];
 	uint16_t req_count = upk_u16le(data, 1);
 	
@@ -1654,6 +1709,23 @@ int datum_protocol_job_validation_stxlist_byid(unsigned char *data) {
 		msg[i] = 0x91; i++;
 		msg[i] = 0xFF; i++;
 		msg[i] = 0xF3; i++;
+		
+		// pad with some randomness
+		j = 1 + (rand() % 100);
+		memset(&msg[i], rand(), j);
+		i+=j;
+		
+		datum_protocol_mining_cmd(msg, i);
+		return 1;
+	}
+	
+	if (3 + 2 * (int)req_count > len) {
+		// the index list is shorter than the count claims
+		// error response to 0x50 0x11
+		msg[i] = 0x50; i++;
+		msg[i] = 0x91; i++;
+		msg[i] = job_index; i++;
+		msg[i] = 0xF4; i++;
 		
 		// pad with some randomness
 		j = 1 + (rand() % 100);
@@ -1752,6 +1824,28 @@ int datum_protocol_job_validation_stxlist_byid(unsigned char *data) {
 			return 1;
 		}
 		
+		// The count gate above does not stop a request that names the same
+		// index repeatedly, so bound the reply as it grows rather than trust
+		// the list to sum to at most one block.
+		if (!datum_protocol_stxlist_reply_fits((size_t)i, block_template->txns[req_id].size)) {
+			pthread_rwlock_unlock(&datum_jobs_rwlock);
+			DLOG_WARN("DATUM server requested %u transactions for job %d, more than one reply can carry; refusing", (unsigned)req_count, (int)job_index);
+			// error response to 0x50 0x11
+			i = 0; // reset index
+			msg[i] = 0x50; i++;
+			msg[i] = 0x91; i++;
+			msg[i] = job_index; i++;
+			msg[i] = 0xF4; i++;
+			
+			// pad with some randomness
+			j = 1 + (rand() % 100);
+			memset(&msg[i], rand(), j);
+			i+=j;
+			
+			datum_protocol_mining_cmd(msg, i);
+			return 1;
+		}
+		
 		// size is stored as 3 bytes for consistency.
 		// this is technically redundant, as the server can derive this by decoding the transaction
 		// however, we're future-proofing just a little here for a tiny bit of overhead.
@@ -1781,7 +1875,8 @@ int datum_protocol_job_validation_stxlist_byid(unsigned char *data) {
 	return 1;
 }
 
-int datum_protocol_job_validation_sblock(unsigned char *data) {
+int datum_protocol_job_validation_sblock(int len, unsigned char *data) {
+	if (len < 1) return 0;
 	// the server decided our template probably is too unique from what it knows about, or was
 	// otherwise not able to validate the block using faster negotiations.
 	// It would like us to just send the entire transaction blob for validation as-is.
@@ -1950,31 +2045,29 @@ static int datum_protocol_job_validation_parent_fetch(
 }
 
 int datum_protocol_job_validation_cmd(int len, unsigned char *data) {
-	unsigned char cmd = data[0];
-	unsigned char *p = data;
-	
 	if (len < 2) return 0;
 	
-	p++;
+	const unsigned char cmd = data[0];
+	unsigned char *p = data + 1;
 	
 	// sub sub cmd
 	switch (cmd) {
 		case 0x10: {
 			// send short txn list
-			return datum_protocol_job_validation_stxlist(p);
+			return datum_protocol_job_validation_stxlist(len - 1, p);
 			break;
 		}
 		
 		case 0x11: {
 			// send the requested txns
 			// 16-bit indexes
-			return datum_protocol_job_validation_stxlist_byid(p);
+			return datum_protocol_job_validation_stxlist_byid(len - 1, p);
 			break;
 		}
 		
 		case 0x12: {
 			// send the entire block, except the coinbase txn
-			return datum_protocol_job_validation_sblock(p);
+			return datum_protocol_job_validation_sblock(len - 1, p);
 			break;
 		}
 		
@@ -2379,16 +2472,14 @@ int datum_protocol_send_hello(int sockfd) {
 	i+=crypto_sign_BYTES;
 	
 	// seal it up
-	crypto_box_seal(&enc_hello_msg[sizeof(T_DATUM_PROTOCOL_HEADER)], hello_msg, i, pool_keys.pk_x25519);
+	crypto_box_seal(&enc_hello_msg[T_DATUM_PROTOCOL_HEADER_WIRE_BYTES], hello_msg, i, pool_keys.pk_x25519);
 	i+=crypto_box_SEALBYTES;
 	
 	h.cmd_len = i;
 	
-	memcpy(enc_hello_msg, &h, sizeof(T_DATUM_PROTOCOL_HEADER));
-	
 	// apply our initial xor key to the header, just to obfuscate it a tiny bit
 	// kinda pointless, but ok
-	datum_xor_header_key(&enc_hello_msg[0], sending_header_key);
+	datum_header_pk(enc_hello_msg, 0, &h, &sending_header_key);
 	
 	DLOG_DEBUG("Sending handshake init (%d bytes)", h.cmd_len);
 	
@@ -2411,7 +2502,7 @@ int datum_protocol_send_hello(int sockfd) {
 	// FIXME: why is this mixed-endian?
 	//DLOG_DEBUG("Session Nonce: %8.8X%8.8X%8.8X%8.8X%8.8X%8.8X", upk_u32le(session_nonce_receiver, 0), upk_u32le(session_nonce_receiver, 4), upk_u32le(session_nonce_receiver, 8), upk_u32le(session_nonce_receiver, 12), upk_u32le(session_nonce_receiver, 16), upk_u32le(session_nonce_receiver, 20));
 	
-	return datum_protocol_chars_to_server(enc_hello_msg, i+sizeof(T_DATUM_PROTOCOL_HEADER));
+	return datum_protocol_chars_to_server(enc_hello_msg, i+T_DATUM_PROTOCOL_HEADER_WIRE_BYTES);
 }
 
 int datum_protocol_decrypt_sealed(T_DATUM_PROTOCOL_HEADER *h, unsigned char *data) {
@@ -2668,8 +2759,12 @@ int datum_protocol_pow_submit(
 		DLOG_ERROR("Could not submit POW for a disclosed anti-withholding assignment");
 		return -1;
 	}
+	char finder[320] = "";
+	if (pow.abw_assignment_id && c) {
+		datum_stratum_describe_block_finder(finder, sizeof(finder), c, username, subsidy_only);
+	}
 	if (pow.abw_assignment_id && !datum_protocol_abw_cache_candidate(
-		&pow, full_cb_tx, full_cb_tx_size, raw_pow_hash)) {
+		&pow, full_cb_tx, full_cb_tx_size, raw_pow_hash, finder)) {
 		DLOG_ERROR("BLAKE2b anti-withholding candidate cache is full");
 		return -1;
 	}
@@ -2938,6 +3033,7 @@ void *datum_protocol_client(void *args) {
 	int pool_port;
 	bool break_again = false;
 	T_DATUM_PROTOCOL_HEADER s_header;
+	unsigned char s_header_wire[T_DATUM_PROTOCOL_HEADER_WIRE_BYTES];
 	datum_connection_configured = false;
 	datum_protocol_abw_deactivate();
 	
@@ -3191,7 +3287,7 @@ void *datum_protocol_client(void *args) {
 				case 1:
 				case 2:
 				case 3: {
-					n = recv(sockfd, ((unsigned char *)&s_header) + (sizeof(T_DATUM_PROTOCOL_HEADER) - protocol_state), protocol_state, MSG_DONTWAIT);
+					n = recv(sockfd, s_header_wire + (T_DATUM_PROTOCOL_HEADER_WIRE_BYTES - protocol_state), protocol_state, MSG_DONTWAIT);
 					if (n <= 0) {
 						if ((n < 0) && ((errno == EAGAIN || errno == EWOULDBLOCK))) {
 							continue;
@@ -3200,13 +3296,13 @@ void *datum_protocol_client(void *args) {
 						break_again = true; break;
 					}
 					
-					if ((n+(sizeof(T_DATUM_PROTOCOL_HEADER) - protocol_state)) != sizeof(T_DATUM_PROTOCOL_HEADER)) {
+					if ((n+(T_DATUM_PROTOCOL_HEADER_WIRE_BYTES - protocol_state)) != T_DATUM_PROTOCOL_HEADER_WIRE_BYTES) {
 						if ((n+protocol_state) > 4) {
 							DLOG_DEBUG("recv() issue. too many header bytes. protocol_state=%d, n=%d, errno=%d (%s)", protocol_state, n, errno, strerror(errno));
 							break_again = true; break;
 						}
 						
-						protocol_state = sizeof(T_DATUM_PROTOCOL_HEADER) - n - (sizeof(T_DATUM_PROTOCOL_HEADER) - protocol_state); // should give us a state equal to the number of. consoluted to show the process. (compiler optimizes)
+						protocol_state = T_DATUM_PROTOCOL_HEADER_WIRE_BYTES - n - (T_DATUM_PROTOCOL_HEADER_WIRE_BYTES - protocol_state); // should give us a state equal to the number of. consoluted to show the process. (compiler optimizes)
 						continue;
 					}
 					
@@ -3214,7 +3310,7 @@ void *datum_protocol_client(void *args) {
 					continue; // cant fall through to 0, so loop around back to this to jump to 4
 				}
 				case 0: {
-					n = recv(sockfd, &s_header, sizeof(T_DATUM_PROTOCOL_HEADER), MSG_DONTWAIT);
+					n = recv(sockfd, s_header_wire, T_DATUM_PROTOCOL_HEADER_WIRE_BYTES, MSG_DONTWAIT);
 					if (n <= 0) {
 						if ((n < 0) && ((errno == EAGAIN || errno == EWOULDBLOCK))) {
 							continue;
@@ -3222,12 +3318,12 @@ void *datum_protocol_client(void *args) {
 						DLOG_DEBUG("recv() issue. protocol_state=%d, n=%d, errno=%d (%s)", protocol_state, n, errno, strerror(errno));
 						break_again = true; break;
 					}
-					if (n != sizeof(T_DATUM_PROTOCOL_HEADER)) {
+					if (n != T_DATUM_PROTOCOL_HEADER_WIRE_BYTES) {
 						if (n > 4) {
 							DLOG_DEBUG("recv() issue. too many header bytes (B). protocol_state=%d, n=%d, errno=%d (%s)", protocol_state, n, errno, strerror(errno));
 							break_again = true; break;
 						}
-						protocol_state = sizeof(T_DATUM_PROTOCOL_HEADER)-n;
+						protocol_state = T_DATUM_PROTOCOL_HEADER_WIRE_BYTES-n;
 						continue;
 					}
 					
@@ -3237,9 +3333,7 @@ void *datum_protocol_client(void *args) {
 				}
 				
 				case 4: {
-					datum_xor_header_key(&s_header, receiving_header_key);
-					//DLOG_DEBUG("Server CMD: cmd=%u, len=%u, raw = %8.8x ... rkey = %8.8x", s_header.proto_cmd, s_header.cmd_len, upk_u32le(s_header, 0), receiving_header_key);
-					receiving_header_key = datum_header_xor_feedback(receiving_header_key);
+					datum_header_upk(&s_header, s_header_wire, 0, &receiving_header_key);
 					protocol_state = 5;
 					server_in_buf = 0;
 					if (!s_header.cmd_len) {

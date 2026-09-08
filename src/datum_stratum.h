@@ -37,6 +37,7 @@
 #define _DATUM_STRATUM_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifndef T_DATUM_CLIENT_DATA
@@ -65,8 +66,9 @@
 // itself never reaches the miner. A smaller class therefore only omits some of
 // the pool's dictated outputs from the block; their value is paid to the
 // pool's address as the remainder. BLAKE2b work serves every miner
-// COINBASE_TYPE_YUGE once the full coinbase is ready and COINBASE_TYPE_TINY
-// before that (datum_stratum_coinbase_index); classes 1, 2, 3 and 5 are still
+// COINBASE_TYPE_YUGE once the full coinbase is ready. Until then a pooled
+// job is DATUM_COINBASE_ID_EMPTY (subsidy-only, not class 0 + a full
+// template); solo stays COINBASE_TYPE_TINY. Classes 1, 2, 3 and 5 are still
 // built, but their indexes never appear in a job id. The 16000-byte limit of
 // COINBASE_TYPE_YUGE covers the whole coinbase transaction
 // (datum_stratum_coinbase_fit_to_template subtracts the fixed bytes), so it
@@ -152,6 +154,8 @@ typedef struct T_DATUM_STRATUM_JOB {
 	// BLAKE2b job fields
 	uint32_t blake2b_time_on_wire;
 	uint8_t blake2b_flags;
+	// Tagged hash shared by every submitted share for this job.
+	unsigned char blake2b_prevblock_hidden[32];
 	
 	T_DATUM_TEMPLATE_DATA *block_template;
 	
@@ -294,6 +298,7 @@ void stratum_job_merkle_root_calc(T_DATUM_STRATUM_JOB *s, unsigned char *coinbas
 int assembleBlockAndSubmit(uint8_t *block_header, uint8_t *coinbase_txn, size_t coinbase_txn_size, T_DATUM_STRATUM_JOB *job, T_DATUM_STRATUM_THREADPOOL_DATA *sdata, const char *block_hash_hex, bool empty_work, const unsigned char *extranonce);
 size_t datum_stratum_coinbase_for_block_hex(char *out, size_t out_size, const uint8_t *coinbase_txn, size_t coinbase_txn_size, bool add_witness);
 bool datum_stratum_block_needs_witness(const T_DATUM_STRATUM_JOB *job, bool subsidy_only);
+void datum_stratum_describe_block_finder(char *out, size_t outsz, const T_DATUM_CLIENT_DATA *c, const char *username, bool empty_work);
 size_t datum_stratum_build_block_request_parts(char *out, size_t out_size,
 	const uint8_t *block_header,
 	const uint8_t *coinbase_txn, size_t coinbase_txn_size, bool add_witness,

@@ -55,7 +55,17 @@ extern atomic_uint_fast64_t datum_session_generation;
 extern unsigned char datum_protocol_next_job_idx;
 extern T_DATUM_PROTOCOL_JOB datum_jobs[MAX_DATUM_PROTOCOL_JOBS];
 
+// Scratch buffer for replies built on the protocol thread, and the most a
+// 0x50 0x11 reply may hold before its terminator and padding.
+#define DATUM_PROTOCOL_TEMP_DATA_SIZE (DATUM_PROTOCOL_MAX_CMD_DATA_SIZE + 16384)
+#define DATUM_STXLIST_REPLY_MAX (DATUM_PROTOCOL_MAX_CMD_DATA_SIZE - 113)
+extern unsigned char temp_data[DATUM_PROTOCOL_TEMP_DATA_SIZE];
+bool datum_protocol_stxlist_reply_fits(size_t offset, size_t txn_size);
+int datum_protocol_job_validation_stxlist_byid(int len, unsigned char *data);
+
 uint32_t datum_header_xor_feedback(uint32_t i);
+void datum_header_pk(uint8_t * const dst, const size_t offset, const T_DATUM_PROTOCOL_HEADER * const h, uint32_t * const xor_key);
+void datum_header_upk(T_DATUM_PROTOCOL_HEADER * const h, const uint8_t * const src, const size_t offset, uint32_t * const xor_key);
 int datum_protocol_flush_socket(int sockfd);
 void datum_protocol_bulk_reset(void);
 int datum_protocol_bulk_cmd_for_session(
@@ -73,11 +83,14 @@ T_DATUM_REPLAY_PENDING *datum_protocol_replay_add(
 void datum_protocol_replay_mark_responded_legacy(
 	uint32_t nonce, uint8_t target_pot, uint8_t job_id);
 
+// Room for the description of the client that found a pending ABW candidate
+#define DATUM_ABW_FINDER_LEN 320
+
 void datum_protocol_abw_reset(void);
 bool datum_protocol_abw_assignment_revealed(uint8_t assignment_id);
 bool datum_protocol_abw_cache_candidate(const T_DATUM_PROTOCOL_POW *pow,
 	const unsigned char *full_cb_tx, size_t full_cb_tx_size,
-	const unsigned char *raw_pow_hash);
+	const unsigned char *raw_pow_hash, const char *finder);
 int datum_protocol_abw_candidate_receipt(int len, unsigned char *data);
 int datum_protocol_abw_candidate_release(int len, unsigned char *data);
 int datum_protocol_abw_activation(int len, unsigned char *data);
