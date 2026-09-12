@@ -663,6 +663,165 @@ void datum_api_cmd_kill_client2(const char * const data, const size_t size, cons
 	datum_api_cmd_kill_client(tid, cid);
 }
 
+static int datum_api_send_json(struct MHD_Connection *connection, char *json, int must_free)
+{
+	struct MHD_Response *response;
+	if (!json) {
+		return datum_api_do_error(connection, MHD_HTTP_INTERNAL_SERVER_ERROR);
+	}
+	if (must_free) {
+		response = MHD_create_response_from_buffer(strlen(json), json, MHD_RESPMEM_MUST_FREE);
+	} else {
+		response = MHD_create_response_from_buffer(strlen(json), (void *)json, MHD_RESPMEM_MUST_COPY);
+	}
+	if (!response) {
+		if (must_free) {
+			free(json);
+		}
+		return MHD_NO;
+	}
+	MHD_add_response_header(response, "Content-Type", "application/json");
+	return datum_api_submit_uncached_response(connection, MHD_HTTP_OK, response);
+}
+
+static void json_escape_user(char *dst, size_t dst_len, const char *src)
+{
+	size_t i = 0, o = 0;
+	if (!dst || !dst_len) {
+		return;
+	}
+	dst[0] = 0;
+	if (!src) {
+		return;
+	}
+	for (; src[i] && o + 2 < dst_len; i++) {
+		if (src[i] == '"' || src[i] == '\\') {
+			if (o + 3 >= dst_len) {
+				break;
+			}
+			dst[o++] = '\\';
+			dst[o++] = src[i];
+		} else if ((unsigned char)src[i] < 32) {
+			continue;
+		} else {
+			dst[o++] = src[i];
+		}
+	}
+	dst[o] = 0;
+}
+
+static void datum_api_cmd_kill_client_checked(int tid, int cid, json_t *root)
+{
+	json_t *jt = json_object_get(root, "t");
+	json_t *jid = json_object_get(root, "id");
+	if (!jt) {
+		jt = json_object_get(root, "connect_tsms");
+	}
+	if (!jid) {
+		jid = json_object_get(root, "unique_id");
+	}
+	if (!global_stratum_app || tid < 0 || tid >= global_stratum_app->max_threads
+	    || cid < 0 || cid >= global_stratum_app->max_clients_thread) {
+		return;
+	}
+	if (json_is_integer(jt) || json_is_integer(jid)) {
+		const T_DATUM_MINER_DATA * const m = global_stratum_app->datum_threads[tid].client_data[cid].app_client_data;
+		if (!m) {
+			return;
+		}
+		if (json_is_integer(jt) && (uint64_t)json_integer_value(jt) != m->connect_tsms) {
+			DLOG_WARN("API kill_client ignored; connect tsms mismatch %d/%d", tid, cid);
+			return;
+		}
+		if (json_is_integer(jid) && (uint64_t)json_integer_value(jid) != m->unique_id) {
+			DLOG_WARN("API kill_client ignored; unique id mismatch %d/%d", tid, cid);
+			return;
+		}
+	}
+	datum_api_cmd_kill_client(tid, cid);
+}
+
+static int datum_api_cmd_list_clients(struct MHD_Connection *connection)
+{
+	char *output = NULL;
+	size_t cap, used = 0;
+	int j, ii, connected = 0;
+	uint64_t tsms;
+	const int max_threads = global_stratum_app ? global_stratum_app->max_threads : 0;
+
+	if (global_stratum_app) {
+		for (j = 0; j < max_threads; ++j) {
+			connected += global_stratum_app->datum_threads[j].connected_clients;
+		}
+	}
+	if (connected < 0) {
+		connected = 0;
+	}
+	cap = 256 + ((size_t)connected + 1) * 256;
+	output = calloc(1, cap);
+	if (!output) {
+		return datum_api_do_error(connection, MHD_HTTP_INTERNAL_SERVER_ERROR);
+	}
+	used = (size_t)snprintf(output, cap, "{\"ok\":true,\"accept_sv1\":%s,\"clients\":[",
+				datum_stratum_accept_clients() ? "true" : "false");
+	tsms = current_time_millis();
+	for (j = 0; j < max_threads; ++j) {
+		for (ii = 0; ii < global_stratum_app->max_clients_thread; ii++) {
+			T_DATUM_MINER_DATA *m;
+			double hr = 0.0;
+			unsigned char astat;
+			char user[256];
+			int n;
+			if (global_stratum_app->datum_threads[j].client_data[ii].fd <= 0) {
+				continue;
+			}
+			m = (T_DATUM_MINER_DATA *)global_stratum_app->datum_threads[j].client_data[ii].app_client_data;
+			if (!m) {
+				continue;
+			}
+			astat = m->stats.active_index ? 0 : 1;
+			if ((m->stats.last_swap_ms > 0) && (m->stats.diff_accepted[astat] > 0)) {
+				hr = ((double)m->stats.diff_accepted[astat] / (double)((double)m->stats.last_swap_ms / 1000.0)) * 0.004294967296;
+			}
+			if (((double)(tsms - m->stats.last_swap_tsms) / 1000.0) >= 180.0) {
+				hr = 0.0;
+			}
+			json_escape_user(user, sizeof user, m->last_auth_username);
+			if (used + 220 >= cap) {
+				size_t ncap = cap * 2;
+				char *nb = realloc(output, ncap);
+				if (!nb) {
+					free(output);
+					return datum_api_do_error(connection, MHD_HTTP_INTERNAL_SERVER_ERROR);
+				}
+				output = nb;
+				cap = ncap;
+			}
+			n = snprintf(output + used, cap - used,
+				     "%s{\"tid\":%d,\"cid\":%d,\"connect_tsms\":%llu,\"unique_id\":%llu,"
+				     "\"hs\":%.8g,\"user\":\"%s\"}",
+				     used > 60 && output[used - 1] != '[' ? "," : "",
+				     j, ii, (unsigned long long)m->connect_tsms,
+				     (unsigned long long)m->unique_id, hr * 1e12, user);
+			if (n < 0 || (size_t)n >= cap - used) {
+				free(output);
+				return datum_api_do_error(connection, MHD_HTTP_INTERNAL_SERVER_ERROR);
+			}
+			used += (size_t)n;
+		}
+	}
+	if (used + 3 >= cap) {
+		char *nb = realloc(output, used + 4);
+		if (!nb) {
+			free(output);
+			return datum_api_do_error(connection, MHD_HTTP_INTERNAL_SERVER_ERROR);
+		}
+		output = nb;
+	}
+	memcpy(output + used, "]}", 3);
+	return datum_api_send_json(connection, output, 1);
+}
+
 int datum_api_cmd(struct MHD_Connection *connection, char *post, int len) {
 	struct MHD_Response *response;
 	char output[1024];
@@ -707,10 +866,29 @@ int datum_api_cmd(struct MHD_Connection *connection, char *post, int len) {
 										param = json_object_get(root, "cid");
 										if (json_is_integer(param)) {
 											cid = json_integer_value(param);
-											datum_api_cmd_kill_client(tid,cid);
+											datum_api_cmd_kill_client_checked(tid, cid, root);
 										}
 									}
 									break;
+								}
+								break;
+							}
+							case 'l': {
+								if (!strcmp(cstr, "list_clients")) {
+									json_decref(root);
+									return datum_api_cmd_list_clients(connection);
+								}
+								break;
+							}
+							case 's': {
+								if (!strcmp(cstr, "set_accept_sv1")) {
+									param = json_object_get(root, "accept");
+									datum_stratum_set_accept_clients(json_is_true(param));
+									json_decref(root);
+									return datum_api_send_json(connection,
+										datum_stratum_accept_clients()
+										? "{\"ok\":true,\"accept_sv1\":true}"
+										: "{\"ok\":true,\"accept_sv1\":false}", 0);
 								}
 								break;
 							}

@@ -85,6 +85,28 @@ uint64_t stratum_client_accepted_share_diff = 0;
 uint64_t stratum_client_rejected_share_count = 0;
 uint64_t stratum_client_rejected_share_diff = 0;
 
+static pthread_mutex_t stratum_accept_mu = PTHREAD_MUTEX_INITIALIZER;
+static bool stratum_accept_clients = true;
+
+void datum_stratum_set_accept_clients(bool accept)
+{
+	pthread_mutex_lock(&stratum_accept_mu);
+	if (stratum_accept_clients != accept) {
+		DLOG_WARN("Public SV1 accept_clients now %s", accept ? "true" : "false");
+	}
+	stratum_accept_clients = accept;
+	pthread_mutex_unlock(&stratum_accept_mu);
+}
+
+bool datum_stratum_accept_clients(void)
+{
+	bool accept;
+	pthread_mutex_lock(&stratum_accept_mu);
+	accept = stratum_accept_clients;
+	pthread_mutex_unlock(&stratum_accept_mu);
+	return accept;
+}
+
 void stratum_latest_empty_increment_complete(uint64_t index, int clients_notified) {
 	pthread_rwlock_wrlock(&stratum_global_latest_empty_stat);
 	if ((stratum_latest_empty_job_index == index) && (!stratum_latest_empty_ready_for_full)) {
@@ -1483,6 +1505,38 @@ int client_mining_authorize(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 	
 	strncpy(m->last_auth_username, username_s, sizeof(m->last_auth_username) - 1);
 	m->last_auth_username[sizeof(m->last_auth_username)-1] = 0;
+
+	if (!datum_stratum_accept_clients()) {
+		char idbuf[160];
+		stratum_rpc_id_text(c, id, idbuf, sizeof(idbuf));
+		snprintf(s, sizeof(s),
+			 "{\"id\":%s,\"result\":null,\"error\":[24,\"pool-at-capacity\",null]}\n",
+			 idbuf);
+		datum_socket_send_string_to_client(c, s);
+		stratum_rpc_id_clear(c);
+		return 0;
+	}
+
+	if (datum_config.datum_pool_pass_full_users) {
+		char ident[256];
+		unsigned char script[64];
+		size_t n = 0;
+		while (username_s[n] && username_s[n] != '.' && n + 1 < sizeof ident) {
+			ident[n] = username_s[n];
+			n++;
+		}
+		ident[n] = 0;
+		if (!n || !addr_2_output_script(ident, script, (int)sizeof script)) {
+			char idbuf[160];
+			stratum_rpc_id_text(c, id, idbuf, sizeof(idbuf));
+			snprintf(s, sizeof(s),
+				 "{\"id\":%s,\"result\":null,\"error\":[24,\"invalid-payout-address\",null]}\n",
+				 idbuf);
+			datum_socket_send_string_to_client(c, s);
+			stratum_rpc_id_clear(c);
+			return 0;
+		}
+	}
 	
 	char idbuf[160];
 	stratum_rpc_id_text(c, id, idbuf, sizeof(idbuf));
