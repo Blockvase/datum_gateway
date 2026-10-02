@@ -90,19 +90,6 @@ static void datum_blake2b_coinbase_limit_tests(void) {
 	datum_test(datum_stratum_coinbase_fit_to_template(1000, 100, &job) == 850);
 }
 
-static void datum_coinbaser_value_overflow_tests(void) {
-	T_DATUM_STRATUM_JOB job = {.coinbase_value = UINT64_C(5000000000)};
-	unsigned char response[] = {
-		1,
-		1, 0, 0, 0, 0, 0, 0, 0, 2, 0x51, 0x51,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 2, 0x51, 0x51,
-	};
-
-	datum_test(datum_coinbaser_v2_parse(&job, response, sizeof(response), false) == 1);
-	datum_test(job.available_coinbase_outputs_count == 1);
-	datum_test(job.available_coinbase_outputs[0].value_sats == 1);
-}
-
 /* P2PKH: OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG, 25 bytes. */
 static const unsigned char datum_test_p2pkh_script[25] = {0x76, 0xa9, 0x14, [23] = 0x88, 0xac};
 /* P2WPKH: OP_0 <20 bytes>, 22 bytes. */
@@ -210,7 +197,7 @@ static void datum_coinbaser_bare_p2pk_sigops_tests(void) {
 	memset(response + 2, 0, 7);
 	response[9] = (unsigned char)sizeof(datum_test_p2pk_script);
 	memcpy(response + 10, datum_test_p2pk_script, sizeof(datum_test_p2pk_script));
-	datum_test(datum_coinbaser_v2_parse(job, response, sizeof(response), false) == 1);
+	datum_test(datum_coinbaser_v2_parse(job, response, sizeof(response)) == 1);
 	datum_test(job->available_coinbase_outputs[0].sigops == 4);
 
 	memset(&tdata, 0, sizeof(tdata));
@@ -225,6 +212,19 @@ static void datum_coinbaser_bare_p2pk_sigops_tests(void) {
 	/* Budget of 4: the bare P2PK fits. */
 	datum_test(!strncmp(datum_coinbase_output_count_hex(job, 80000 - 4, false), "03", 2));
 	free(job);
+}
+
+static void datum_coinbaser_value_overflow_tests(void) {
+	T_DATUM_STRATUM_JOB job = {.coinbase_value = UINT64_C(5000000000)};
+	unsigned char response[] = {
+		1,
+		1, 0, 0, 0, 0, 0, 0, 0, 2, 0x51, 0x51,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 2, 0x51, 0x51,
+	};
+	
+	datum_test(datum_coinbaser_v2_parse(&job, response, sizeof(response)) == 1);
+	datum_test(job.available_coinbase_outputs_count == 1);
+	datum_test(job.available_coinbase_outputs[0].value_sats == 1);
 }
 
 void datum_coinbaser_tests(void) {
