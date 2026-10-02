@@ -52,25 +52,16 @@
 
 #define MAX_COINBASE_TYPES 6
 #define DATUM_COINBASE_ID_EMPTY 0xff
-#define COINBASE_TYPE_TINY 0 // "empty", just pays pool
-#define COINBASE_TYPE_SMALL 1 // Nicehash needs a tiny coinb1, among other things. Max 500 bytes.
-#define COINBASE_TYPE_ANTMAIN 2 // Hack for antminer stock firmware to 750 bytes
-#define COINBASE_TYPE_RESPECTABLE 3 // 6500 byte max (whatsminers)
-#define COINBASE_TYPE_YUGE 4 // 16KB max (ePIC, bitaxe)
-#define COINBASE_TYPE_ANTMAIN2 5 // 2.25KB max (S21, +?)
-// The classes were sized to what SHA256d firmware could accept, since those
-// miners receive coinb1/coinb2 and hash the coinbase. On BLAKE2b work the
-// miner receives 000000 || H2 || 00000000 as coinb1 (H2 is the "Merge-mining
-// hook" tagged hash, which commits to the coinbase) and an empty coinb2, and
-// the work root is blake2b(0x00 || coinb1 || extranonce), so the coinbase
-// itself never reaches the miner. A smaller class therefore only omits some of
-// the pool's dictated outputs from the block; their value is paid to the
-// pool's address as the remainder. BLAKE2b work serves every miner
-// COINBASE_TYPE_YUGE once the full coinbase is ready. Until then a pooled
-// job is DATUM_COINBASE_ID_EMPTY (subsidy-only, not class 0 + a full
-// template); solo stays COINBASE_TYPE_TINY. Classes 1, 2, 3 and 5 are still
-// built, but their indexes never appear in a job id. The 16000-byte limit of
-// COINBASE_TYPE_YUGE covers the whole coinbase transaction
+#define COINBASE_TYPE_TINY 0 // solo: pays the local address only
+#define COINBASE_TYPE_YUGE 4 // full coinbase, up to 16KB
+// Indexes 1, 2, 3 and 5 stay unused so a full job id still ends in 04 and a
+// subsidy-only job still ends in ff. On BLAKE2b the miner receives
+// 000000 || H2 || 00000000 as coinb1 and an empty coinb2. The work root is
+// blake2b(0x00 || coinb1 || extranonce), so the coinbase itself never reaches
+// the miner. Every miner gets COINBASE_TYPE_YUGE once the full coinbase is
+// ready. Until then a pooled job is DATUM_COINBASE_ID_EMPTY (subsidy-only,
+// not class 0 plus a full template); solo stays COINBASE_TYPE_TINY. The
+// 16000-byte limit covers the whole coinbase transaction
 // (datum_stratum_coinbase_fit_to_template subtracts the fixed bytes), so it
 // fits in STRATUM_COINBASE2_MAX_LEN (32768 hex characters, 16384 bytes) and
 // holds a little under 512 P2WPKH outputs (31 bytes each), the most a
@@ -171,13 +162,7 @@ typedef struct T_DATUM_STRATUM_JOB {
 	uint8_t pool_addr_script[MAX_OUTPUT_SCRIPT_LEN];
 	uint8_t pool_addr_script_len;
 	
-	// multiple coinbase options
-	// 0 = "empty" --- just pays pool addr, and possibly TIDES data.  extranonce in coinbase if fits, or in first output if not.
-	// 1 = "nicehash" --- roughly 500 bytes total... smaller than antminer... has nothing before the extranonce OP_RETURN (or no extranonce OP_RETURN if enough space in the coinbase)
-	// 2 = "antminer" --- roughly 730 bytes max size, using a larger coinb1 and UART sync bits.  This also works as a good default.
-	// 3 = "whatsminer" --- max 6500 bytes tested.  does not need the extranonce OP_RETURN unless there's no space in the coinbase itself after tags
-	// 4 = "huge" --- max 16kB --- this is probably the most we should reasonably attempt to do in the coinbase... something like 380 to 530 outputs, depending on the type of output
-	// 5 = "antminer2" --- max 2250 bytes --- latest S21s appear to support this
+	// Index 0 pays the local address only. Index 4 is the full coinbase.
 	T_DATUM_STRATUM_COINBASE coinbase[MAX_COINBASE_TYPES];
 	T_DATUM_STRATUM_COINBASE subsidy_only_coinbase;
 	int target_pot_index; // where in coinb1 do we put our per-user vardiff pot value?
@@ -270,8 +255,6 @@ typedef struct {
 	bool quickdiff_active;
 	uint64_t quickdiff_value;
 	uint8_t quickdiff_target[32];
-	
-	uint64_t forced_high_min_diff;
 	
 	int last_sent_stratum_job_index;
 	

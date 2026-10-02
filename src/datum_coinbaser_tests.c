@@ -113,9 +113,9 @@ static const char *datum_coinbase_output_count_hex(T_DATUM_STRATUM_JOB *job, uin
 		memcpy(job->pool_addr_script, datum_test_p2wpkh_script, sizeof(datum_test_p2wpkh_script));
 		job->pool_addr_script_len = sizeof(datum_test_p2wpkh_script);
 	}
-	memset(job->coinbase[1].coinb2, 0, sizeof(job->coinbase[1].coinb2));
-	generate_coinbase_txns_for_stratum_job_subtypebysize(job, 1, 1000, true, cb1idx, cb2idx, false);
-	return job->coinbase[1].coinb2 + 8;
+	memset(job->coinbase[COINBASE_TYPE_YUGE].coinb2, 0, sizeof(job->coinbase[COINBASE_TYPE_YUGE].coinb2));
+	generate_coinbase_txns_for_stratum_job_subtypebysize(job, COINBASE_TYPE_YUGE, 1000, true, cb1idx, cb2idx);
+	return job->coinbase[COINBASE_TYPE_YUGE].coinb2 + 8;
 }
 
 static void datum_blake2b_coinbase_sigops_tests(void) {

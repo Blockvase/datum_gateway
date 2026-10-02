@@ -248,6 +248,12 @@ static void datum_blake2b_malformed_submit_job_tests(void) {
 		"{\"id\":8,\"method\":\"mining.submit\",\"params\":[\"miner\",\"0000000000c0de00\",\"0000000000000000\",\"000000000000000g\",\"00000000\"]}",
 		"{\"id\":8,\"method\":\"mining.submit\",\"params\":[\"miner\",\"0000000000c0de00\",\"0000000000000000\",\"00000000\",\"0000000g\"]}",
 		"{\"id\":8,\"method\":\"mining.submit\",\"params\":[\"miner\",\"0000000000c0de00\",\"0000000000000000\",\"00000000\",\"000000000000000g\"]}",
+		"{\"id\":8,\"method\":\"mining.submit\",\"params\":[\"miner\",\"0000000000c0de01\",\"0000000000000000\",\"00000000\",\"00000000\"]}",
+		"{\"id\":8,\"method\":\"mining.submit\",\"params\":[\"miner\",\"0000000000c0de02\",\"0000000000000000\",\"00000000\",\"00000000\"]}",
+		"{\"id\":8,\"method\":\"mining.submit\",\"params\":[\"miner\",\"0000000000c0de03\",\"0000000000000000\",\"00000000\",\"00000000\"]}",
+		"{\"id\":8,\"method\":\"mining.submit\",\"params\":[\"miner\",\"0000000000c0de05\",\"0000000000000000\",\"00000000\",\"00000000\"]}",
+		"{\"id\":8,\"method\":\"mining.submit\",\"params\":[\"miner\",\"0000000000c0de00\",\"0000000000000000\",\"00000000\",\"00000000\"]}",
+		"{\"id\":8,\"method\":\"mining.submit\",\"params\":[\"miner\",\"N0000000000c0de04\",\"0000000000000000\",\"00000000\",\"00000000\"]}",
 	};
 	static const char expected[] =
 		"{\"error\":[20,\"unknown-work\",null],\"id\":8,\"result\":null}\n";
@@ -255,6 +261,7 @@ static void datum_blake2b_malformed_submit_job_tests(void) {
 
 	client.app_client_data = &miner;
 	job.block_template = &tdata;
+	job.is_datum_job = true;
 	job.target_pot_index = 0;
 	job.coinbase[0].coinb1_len = 1;
 	job.coinbase[0].coinb1_bin[0] = 0xff;

@@ -866,9 +866,6 @@ void stratum_update_vardiff(T_DATUM_CLIENT_DATA *c, bool no_quick) {
 		if (delta_tsms > 60000) {
 			// 60s with no shares seems sufficient to bump diff down next round.
 			m->current_diff = m->current_diff >> 1;
-			if (m->current_diff < m->forced_high_min_diff) {
-				m->current_diff = m->forced_high_min_diff;
-			}
 			if (m->current_diff < datum_config.stratum_v1_vardiff_min) {
 				m->current_diff = datum_config.stratum_v1_vardiff_min;
 			}
@@ -910,9 +907,6 @@ void stratum_update_vardiff(T_DATUM_CLIENT_DATA *c, bool no_quick) {
 	if (ms_per_share > (target_ms_share*2)) {
 		// adjust diff downward a tick
 		m->current_diff = m->current_diff >> 1;
-		if (m->current_diff < m->forced_high_min_diff) {
-			m->current_diff = m->forced_high_min_diff;
-		}
 		if (m->current_diff < datum_config.stratum_v1_vardiff_min) {
 			m->current_diff = datum_config.stratum_v1_vardiff_min;
 		}
@@ -976,7 +970,7 @@ bool stratum_get_job(const T_DATUM_MINER_DATA * const m, const json_t * const jo
 			*out_job_diff = m->quickdiff_value;
 			*out_job_target = m->quickdiff_target;
 		} else if ((strlen(job_id_s) == 17) && (job_id_s[0] == 'N')) {
-			// new block empty work.  means we use coinbase 0 and we have no merkle leafs
+			// new block empty work uses the subsidy-only coinbase
 			job_id_s++;
 			*out_empty_work = true;
 		} else {
@@ -1019,10 +1013,16 @@ bool stratum_get_job(const T_DATUM_MINER_DATA * const m, const json_t * const jo
 	if (*out_quickdiff && *out_coinbase_index == DATUM_COINBASE_ID_EMPTY) {
 		*out_empty_work = true;
 	}
-	if (*out_coinbase_index >= MAX_COINBASE_TYPES) {
-		if (!(*out_empty_work && *out_coinbase_index == DATUM_COINBASE_ID_EMPTY)) {
-			return false;
-		}
+	/* Subsidy-only work is only the empty index. A pooled job's full
+	 * coinbase is class 4; class 0 is the pool-only coinbase and is not
+	 * advertised. Solo work may use class 0 or class 4. */
+	if (*out_empty_work) {
+		if (*out_coinbase_index != DATUM_COINBASE_ID_EMPTY) return false;
+	} else if ((*out_job)->is_datum_job) {
+		if (*out_coinbase_index != COINBASE_TYPE_YUGE) return false;
+	} else if (*out_coinbase_index != COINBASE_TYPE_TINY &&
+	           *out_coinbase_index != COINBASE_TYPE_YUGE) {
+		return false;
 	}
 	
 	return true;
@@ -1690,16 +1690,6 @@ int send_mining_set_difficulty(T_DATUM_CLIENT_DATA *c) {
 	return 0;
 }
 
-void datum_stratum_fingerprint_by_UA(T_DATUM_MINER_DATA *m) {
-	// BLAKE2b work serves every miner the largest coinbase class. Only the
-	// NiceHash minimum difficulty remains from the old per-firmware classes.
-	if (strstr(m->useragent, "NiceHash/") == m->useragent) {
-		m->current_diff=524288;
-		m->forced_high_min_diff=524288;
-		return;
-	}
-}
-
 int client_mining_subscribe(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj) {
 	uint32_t sid;
 	char s[1024];
@@ -1732,13 +1722,6 @@ int client_mining_subscribe(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 				strncpy_uachars(m->useragent, json_string_value(useragent), 127); // strip some chars
 				m->useragent[127] = 0;
 			}
-		}
-	}
-	
-	if ((datum_config.stratum_v1_fingerprint_miners) && (m->useragent[0])) {
-		datum_stratum_fingerprint_by_UA(m);
-		if (m->current_diff < datum_config.stratum_v1_vardiff_min) {
-			m->current_diff = datum_config.stratum_v1_vardiff_min;
 		}
 	}
 	
