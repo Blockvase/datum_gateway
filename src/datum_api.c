@@ -228,7 +228,19 @@ void datum_api_var_STRATUM_JOB_WITNESS(char *buffer, size_t buffer_size, const T
 	snprintf(buffer, buffer_size, "%s", vardata->sjob->block_template->default_witness_commitment);
 }
 void datum_api_var_STRATUM_JOB_DIFF(char *buffer, size_t buffer_size, const T_DATUM_API_DASH_VARS *vardata) {
-	snprintf(buffer, buffer_size, "%.3Lf", calc_network_difficulty(vardata->sjob->nbits));
+	char formatted[DATUM_FORMAT_NETWORK_DIFFICULTY_OUT_SZ];
+	long double difficulty;
+
+	if (!vardata->sjob) {
+		snprintf(buffer, buffer_size, "n/a");
+		return;
+	}
+	difficulty = calc_network_difficulty_blake2b(vardata->sjob->nbits_uint);
+	if (datum_format_network_difficulty(formatted, sizeof(formatted), difficulty) < 0) {
+		snprintf(buffer, buffer_size, "n/a");
+		return;
+	}
+	snprintf(buffer, buffer_size, "%s", formatted);
 }
 void datum_api_var_STRATUM_JOB_VERSION(char *buffer, size_t buffer_size, const T_DATUM_API_DASH_VARS *vardata) {
 	snprintf(buffer, buffer_size, "%s (%u)", vardata->sjob->version, (unsigned)vardata->sjob->version_uint);

@@ -47,6 +47,30 @@
 
 void stratum_calculate_merkle_branches(T_DATUM_STRATUM_JOB *s);
 int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj);
+uint64_t datum_vardiff_quick_raise(uint64_t current_diff, uint64_t diff_factor);
+uint64_t datum_vardiff_step_raise(uint64_t current_diff);
+
+static void datum_vardiff_bounds_tests(void) {
+	const uint64_t p61 = DATUM_MAX_PDIFF >> 2;
+	const uint64_t p62 = DATUM_MAX_PDIFF >> 1;
+
+	datum_test(datum_vardiff_quick_raise(0, 8) == 0);
+	datum_test(datum_vardiff_quick_raise(65536, 0) == 262144);
+	datum_test(datum_vardiff_quick_raise(65536, 2) == 262144);
+	datum_test(datum_vardiff_quick_raise(65536, 8) == 524288);
+	datum_test(datum_vardiff_quick_raise(p61, 4) == DATUM_MAX_PDIFF);
+	datum_test(datum_vardiff_quick_raise(p61, 8) == DATUM_MAX_PDIFF);
+	datum_test(datum_vardiff_quick_raise(p61 + 1, 1) == DATUM_MAX_PDIFF);
+	datum_test(datum_vardiff_quick_raise(p62, 1) == DATUM_MAX_PDIFF);
+	datum_test(datum_vardiff_quick_raise(DATUM_MAX_PDIFF, 1) == DATUM_MAX_PDIFF);
+	datum_test(datum_vardiff_quick_raise(DATUM_MAX_PDIFF, 2) == DATUM_MAX_PDIFF);
+	datum_test(datum_vardiff_step_raise(0) == 0);
+	datum_test(datum_vardiff_step_raise(65536) == 131072);
+	datum_test(datum_vardiff_step_raise(p62 - 1) == (p62 - 1) << 1);
+	datum_test(datum_vardiff_step_raise(p62) == DATUM_MAX_PDIFF);
+	datum_test(datum_vardiff_step_raise(p62 + 1) == DATUM_MAX_PDIFF);
+	datum_test(datum_vardiff_step_raise(DATUM_MAX_PDIFF) == DATUM_MAX_PDIFF);
+}
 
 static void datum_blake2b_refresh_time_offset_tests(void) {
 	T_DATUM_TEMPLATE_DATA tdata;
@@ -666,6 +690,7 @@ void datum_stratum_mod_username_tests() {
 }
 
 void datum_stratum_tests(void) {
+	datum_vardiff_bounds_tests();
 	datum_stratum_mod_username_tests();
 	datum_stratum_minimum_difficulty_configure_tests();
 	datum_stratum_string_request_id_tests();

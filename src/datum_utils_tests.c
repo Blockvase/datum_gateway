@@ -33,6 +33,7 @@
  *
  */
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -176,6 +177,49 @@ static void datum_utils_tests_pdiff_to_bdiff(void) {
 	datum_test(datum_pdiff_to_bdiff(16) == 15.999755859375L);
 }
 
+static void datum_utils_tests_network_difficulty_blake2b(void) {
+	const long double difficulty = calc_network_difficulty_blake2b(UINT32_C(0x1702c4e4));
+	const long double tip = calc_network_difficulty_blake2b(UINT32_C(0x1900edba));
+	char formatted[DATUM_FORMAT_NETWORK_DIFFICULTY_OUT_SZ];
+	char tiny[4];
+
+	datum_test(fabsl(difficulty / 4.3657653085953146e23L - 1.0L) < 1e-15L);
+	datum_test(calc_network_difficulty_blake2b(0) == 0);
+	/* Sign bit set in the compact mantissa: not a difficulty. */
+	datum_test(calc_network_difficulty_blake2b(UINT32_C(0x1d800001)) == 0);
+	datum_test(calc_network_difficulty_blake2b(UINT32_C(0xff000001)) > 0);
+	/* 0x1900edba is exponent 0x19 and mantissa 0xedba, the current tip form. */
+	datum_test(tip == ldexpl(1.0L, 80) / (long double)0xedba);
+	datum_test(datum_format_network_difficulty(formatted, sizeof(formatted), difficulty) > 0);
+	datum_test(!strcmp(formatted, "436.6Z"));
+	datum_test(datum_format_network_difficulty(formatted, sizeof(formatted), tip) > 0);
+	datum_test(!strcmp(formatted, "19.9E"));
+	datum_test(datum_format_network_difficulty(formatted, sizeof(formatted), 999950) > 0);
+	datum_test(!strcmp(formatted, "1.0M"));
+	datum_test(datum_format_network_difficulty(formatted, sizeof(formatted), 1000) > 0);
+	datum_test(!strcmp(formatted, "1.0k"));
+	datum_test(datum_format_network_difficulty(formatted, sizeof(formatted), 999.94L) > 0);
+	datum_test(!strcmp(formatted, "999.9"));
+	datum_test(datum_format_network_difficulty(formatted, sizeof(formatted), -1.0L) > 0);
+	datum_test(!strcmp(formatted, "0"));
+	datum_test(datum_format_network_difficulty(formatted, sizeof(formatted), INFINITY) > 0);
+	datum_test(!strcmp(formatted, "0"));
+	datum_test(datum_format_network_difficulty(formatted, sizeof(formatted), NAN) > 0);
+	datum_test(!strcmp(formatted, "0"));
+	/* Exponent 1 is 2^272, past the last SI suffix. It has to fit the dashboard buffer. */
+	datum_test(datum_format_network_difficulty(formatted, sizeof(formatted),
+		calc_network_difficulty_blake2b(UINT32_C(0x01000001))) > 0);
+	datum_test(strlen(formatted) < sizeof(formatted));
+	datum_test(strchr(formatted, 'e') != NULL);
+	datum_test(datum_format_network_difficulty(formatted, sizeof(formatted),
+		calc_network_difficulty_blake2b(UINT32_C(0xff000001))) > 0);
+	datum_test(strlen(formatted) < sizeof(formatted));
+	datum_test(datum_format_network_difficulty(NULL, sizeof(formatted), tip) < 0);
+	datum_test(datum_format_network_difficulty(tiny, 0, tip) < 0);
+	datum_test(datum_format_network_difficulty(tiny, sizeof(tiny), tip) < 0);
+	datum_test(tiny[0] == 0);
+}
+
 static void datum_utils_tests_strncpy_printable(void) {
 	char out[8];
 	datum_test(!strncpy_printable(out, NULL, sizeof(out)));
@@ -196,5 +240,6 @@ void datum_utils_tests(void) {
 	datum_utils_tests_secure_strequals();
 	datum_utils_tests_scriptnum();
 	datum_utils_tests_pdiff_to_bdiff();
+	datum_utils_tests_network_difficulty_blake2b();
 	datum_utils_tests_strncpy_printable();
 }

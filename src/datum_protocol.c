@@ -1493,10 +1493,19 @@ err:
 	datum_config.override_mining_coinbase_tag_primary[a] = 0;
 	
 	if (i + 8 > len) goto err;
-	datum_config.override_vardiff_min = upk_u64le(data, i); i+=8;
-	if (datum_config.override_vardiff_min != roundDownToPowerOfTwo_64(datum_config.override_vardiff_min)) {
-		DLOG_WARN("Server specified a minimum difficulty that is not a power of two! Is your client up to date? Rounding up to a power of two! (%"PRIu64" to %"PRIu64")", datum_config.override_vardiff_min, roundDownToPowerOfTwo_64(datum_config.override_vardiff_min)<<1);
-		datum_config.override_vardiff_min = roundDownToPowerOfTwo_64(datum_config.override_vardiff_min)<<1;
+	{
+		uint64_t server_vardiff_min = upk_u64le(data, i); i+=8;
+		uint64_t rounded = server_vardiff_min ? roundDownToPowerOfTwo_64(server_vardiff_min) : 1;
+		if (server_vardiff_min != rounded) {
+			/* A zero minimum becomes 1. Values at or above the ceiling stay
+			 * there instead of shifting off the top of a uint64. */
+			if (server_vardiff_min > 0 && server_vardiff_min < DATUM_MAX_PDIFF) {
+				rounded <<= 1;
+			}
+			DLOG_WARN("Server specified a minimum difficulty that is not a power of two! Is your client up to date? Adjusting to a supported value! (%"PRIu64" to %"PRIu64")", server_vardiff_min, rounded);
+			server_vardiff_min = rounded;
+		}
+		datum_config.override_vardiff_min = server_vardiff_min;
 	}
 	
 	if (i + 2 > len) goto err;

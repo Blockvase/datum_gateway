@@ -84,6 +84,11 @@ bool strncpy_uachars(char *out, const char *in, size_t maxlen);
 bool strncpy_workerchars(char *out, const char *in, size_t maxlen);
 bool strncpy_printable(char *out, const char *in, size_t maxlen);
 long double calc_network_difficulty(const char *bits_hex);
+/* Compact nBits to BLAKE2b network difficulty. 0 if the mantissa is 0. */
+long double calc_network_difficulty_blake2b(uint32_t nbits);
+/* SI suffix for the dashboard. Not the stratum wire format. */
+#define DATUM_FORMAT_NETWORK_DIFFICULTY_OUT_SZ 16
+int datum_format_network_difficulty(char *out, size_t out_size, long double difficulty);
 unsigned char floorPoT(uint64_t x);
 uint64_t datum_siphash(const void *src, uint64_t sz, const unsigned char key[16]);
 uint64_t datum_siphash_mod8(const void *src, uint64_t sz, const unsigned char key[16]);

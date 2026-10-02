@@ -50,6 +50,9 @@
 #define DATUM_POW_RESERVED_BLAKE2B_USE_TIME_OFFSET 0x01
 #define DATUM_POW_FLAG_BLAKE2B 0x08
 
+/* Highest power-of-two pool difficulty vardiff will assign. */
+#define DATUM_MAX_PDIFF (UINT64_C(1) << 63)
+
 bool datum_blake2b_time_on_wire(uint32_t *out, uint64_t ntime, uint64_t offset, uint8_t flags);
 /* The nTime a node reads from a header-v2 block built from this share: the
  * job's wire time plus the hasher's four time-offset bytes when the offset

@@ -682,6 +682,52 @@ long double calc_network_difficulty(const char *bits_hex) {
 	return d;
 }
 
+long double calc_network_difficulty_blake2b(uint32_t nbits) {
+	const unsigned int exponent = nbits >> 24;
+	const uint32_t mantissa = nbits & UINT32_C(0x007fffff);
+
+	/* Compact form stores a sign in bit 23 of the mantissa. A negative
+	 * target is not a difficulty. */
+	if (!mantissa || (nbits & UINT32_C(0x00800000))) return 0;
+	return ldexpl(1.0L, 280 - 8 * (int)exponent) / (long double)mantissa;
+}
+
+static int datum_format_checked(char * const out, const size_t outsz, const int wrote) {
+	if (wrote < 0 || (size_t)wrote >= outsz) {
+		if (outsz) out[0] = 0;
+		return -1;
+	}
+	return wrote;
+}
+
+int datum_format_network_difficulty(char * const out, const size_t outsz, long double diff) {
+	static const char suffixes[] = "kMGTPEZYRQ";
+	const char *suffix;
+	long double shown;
+	int wrote;
+
+	if (!out || !outsz) return -1;
+	if (!(diff > 0) || !isfinite(diff)) {
+		return datum_format_checked(out, outsz, snprintf(out, outsz, "0"));
+	}
+	if (diff < 1000.0L) {
+		return datum_format_checked(out, outsz, snprintf(out, outsz, "%.4Lg", diff));
+	}
+	shown = diff / 1000.0L;
+	suffix = suffixes;
+	while (shown >= 999.95L && suffix[1]) {
+		shown /= 1000.0L;
+		++suffix;
+	}
+	/* Past the last suffix, fixed-point would not fit the dashboard buffer. */
+	if (shown >= 999.95L) {
+		wrote = snprintf(out, outsz, "%.4Lg", diff);
+	} else {
+		wrote = snprintf(out, outsz, "%.1Lf%c", shown, suffix[0]);
+	}
+	return datum_format_checked(out, outsz, wrote);
+}
+
 #define SIPHASH_ROTATE(a, b) ((uint64_t)(((a)<<(b))|((a)>>(64-(b)))))
 #define SIPHASH_HALF_ROUND(a,b,c,d,e,f) do { \
 	a += b; \

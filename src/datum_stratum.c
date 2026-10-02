@@ -819,6 +819,28 @@ void reset_vardiff_stats(T_DATUM_CLIENT_DATA *c) {
 	m->share_snap_tsms = m->sdata->loop_tsms;
 }
 
+uint64_t datum_vardiff_quick_raise(uint64_t current_diff, uint64_t diff_factor) {
+	uint64_t next;
+
+	if (current_diff && diff_factor > DATUM_MAX_PDIFF / current_diff) {
+		next = DATUM_MAX_PDIFF;
+	} else {
+		next = roundDownToPowerOfTwo_64(diff_factor * current_diff);
+	}
+	/* A 4x bump shifts off the top of a uint64 once current_diff exceeds 2^61. */
+	if (current_diff > (DATUM_MAX_PDIFF >> 2)) {
+		next = DATUM_MAX_PDIFF;
+	} else if (next < (current_diff << 2)) {
+		next = current_diff << 2;
+	}
+	return next;
+}
+
+uint64_t datum_vardiff_step_raise(uint64_t current_diff) {
+	if (current_diff >= (DATUM_MAX_PDIFF >> 1)) return DATUM_MAX_PDIFF;
+	return current_diff << 1;
+}
+
 void stratum_update_vardiff(T_DATUM_CLIENT_DATA *c, bool no_quick) {
 	// Should be called at/around a share being accepted?
 	// before processing a mining notify? (for downward
@@ -871,14 +893,7 @@ void stratum_update_vardiff(T_DATUM_CLIENT_DATA *c, bool no_quick) {
 	if ((!m->quickdiff_active) && (!no_quick) && (ms_per_share < (target_ms_share/(uint64_t)datum_config.stratum_v1_vardiff_quickdiff_delta))) {
 		// let's say if we're at 64/shares/min or higher, we'll do a quick bump
 		
-		// reusing this var...
-		// try to set the difficulty quickly to a value that makes some sense based on how many shares we just saw
-		delta_tsms = roundDownToPowerOfTwo_64((target_ms_share / ms_per_share) * m->current_diff);
-		if (delta_tsms < (m->current_diff << 2)) {
-			delta_tsms = (m->current_diff << 2);
-		}
-		
-		m->current_diff = delta_tsms;
+		m->current_diff = datum_vardiff_quick_raise(m->current_diff, target_ms_share / ms_per_share);
 		
 		// send a special clean=true stratum job to the client
 		// this will send the new diff also
@@ -909,8 +924,7 @@ void stratum_update_vardiff(T_DATUM_CLIENT_DATA *c, bool no_quick) {
 	if (m->share_count_since_snap < 16) return;
 	
 	if (ms_per_share < (target_ms_share/2)) {
-		// adjust diff upward a tick
-		m->current_diff = m->current_diff << 1;
+		m->current_diff = datum_vardiff_step_raise(m->current_diff);
 		reset_vardiff_stats(c);
 		return;
 	}
